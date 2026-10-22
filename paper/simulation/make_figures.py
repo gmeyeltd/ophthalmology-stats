@@ -6,12 +6,12 @@ audit/audit_03_validation.py --score).
             headline simulation results.
   Figure 2  Type I error against the fellow-eye correlation of the loss difference (rho_delta), by strategy,
             with the type I error predicted for the naive analysis from the design effect.
-  Figure 3  Variance of the estimated difference relative to the eye-weighted cluster analysis, with the
+  Figure 3  Power against the number of patients (sweep), and the 'one-eye lottery'.
+  Figure 4  Survey of published studies: weighted estimates with 95% intervals.
+  Figure S2 Variance of the estimated difference relative to the eye-weighted cluster analysis, with the
             analytic curves (one eye per patient, patient-averaged, minimum-variance weights).
-  Figure 4  Power against the number of patients (sweep), and the 'one-eye lottery'.
-  Figure 5  Practice audit: validated (two-phase) estimates with 95% intervals, and the rules-only estimates.
 
-Writes figures/Figure{1-5}.tiff (600 dpi, LZW) with .png previews, and results/table1_simulation.csv,
+Writes figures/Figure{1-4}.tiff and FigureS2.tiff (600 dpi, LZW) with .png previews, and results/table1_simulation.csv,
 results/table_s_type1_by_metric.csv.
 
 Usage (from this folder):  python make_figures.py
@@ -221,7 +221,7 @@ def figure2(s):
     fig.legend(h_, l_, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.04), handletextpad=0.3,
                markerscale=1.6)
     fig.tight_layout(rect=(0, 0.06, 1, 1))
-    save(fig, "Figure3")
+    save(fig, "FigureS2")
 
 
 def figure3():
@@ -268,7 +268,7 @@ def figure3():
     h_, l_ = axes[0, 0].get_legend_handles_labels()
     fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.02))
     fig.tight_layout(rect=(0, 0.04, 1, 1))
-    save(fig, "Figure4")
+    save(fig, "Figure3")
 
 
 AUDIT_ROWS = [
@@ -291,25 +291,21 @@ def figure4():
     for yy, (key, lab) in zip(y, AUDIT_ROWS):
         e = r.loc[key]
         ax.plot([e.estimate_lo, e.estimate_hi], [yy, yy], color=COL["cluster"], lw=1.6, solid_capstyle="round")
-        ax.scatter(e.estimate, yy, s=30, color=COL["cluster"], edgecolor="white", linewidth=0.8, zorder=3,
-                   label="Validated estimate (two-phase) with 95% CI" if yy == y[0] else None)
-        ax.scatter(e.rules_only, yy, s=26, marker="D", facecolor="white", edgecolor=COL["naive"], linewidth=1.2,
-                   zorder=3, label="Text-mining rules alone" if yy == y[0] else None)
+        ax.scatter(e.estimate, yy, s=30, color=COL["cluster"], edgecolor="white", linewidth=0.8, zorder=3)
         ax.text(1.005, yy, f"{e.estimate:.0%} ({e.estimate_lo:.0%}-{e.estimate_hi:.0%})", va="center", fontsize=7,
                 color=INK, transform=ax.get_yaxis_transform())
     ax.set_yticks(y)
     ax.set_yticklabels([lab for _, lab in AUDIT_ROWS])
     ax.axhline(y[0] - 0.5, color=GRID, lw=0.6)
     ax.set_xlim(0, 0.8)
-    ax.text(1.005, y[0] + 0.75, "Validated estimate\n(95% CI)", va="bottom", fontsize=7, color=INK2,
+    ax.text(1.005, y[0] + 0.75, "Estimate\n(95% CI)", va="bottom", fontsize=7, color=INK2,
             transform=ax.get_yaxis_transform())
     ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=0))
     grid(ax, "x")
     ax.set_xlabel("Estimated Proportion of Open-Access Studies (Rows 2-8: of Studies With Both Eyes of Some Patients)")
-    ax.legend(loc="lower center", bbox_to_anchor=(0.45, -0.42), ncol=2, frameon=False)
     ax.tick_params(axis="y", length=0)
     fig.tight_layout()
-    save(fig, "Figure5")
+    save(fig, "Figure4")
 
 
 def tables(s):

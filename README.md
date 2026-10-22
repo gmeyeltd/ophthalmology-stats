@@ -90,7 +90,7 @@ random seeds.
 
 ## Citation
 
-Moussa G, et al. Keeping both eyes in comparisons of ophthalmic artificial intelligence models. (in preparation)
+Moussa G, et al. Keeping both eyes when comparing ophthalmic artificial intelligence models: open-source code and simulation study. (in preparation)
 
 ## Licence
 
