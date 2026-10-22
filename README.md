@@ -1,2 +1,2 @@
-# both_eyes_ophthalmology
+# ophthalmology_stats
 Analysing both eyes of one patient in ophthalmology studies
