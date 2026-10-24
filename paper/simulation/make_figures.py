@@ -4,8 +4,9 @@ audit/audit_03_validation.py --score).
 
   Figure 1  Flowchart: how the second eye enters a study (study type, laterality design, analysis), with the
             headline simulation results.
-  Figure 2  Type I error against the fellow-eye correlation of the loss difference (rho_delta), by strategy,
-            with the type I error predicted for the naive analysis from the design effect.
+  Figure 2  Headline: type I error of an eye-level analysis and extra patients needed with one eye, for any
+            rho_delta and proportion bilateral (design effect), with the simulation's observed-vs-predicted check.
+  Figure S3 Type I error against rho_delta by strategy and metric (all simulated settings).
   Figure 3  Power against the number of patients (sweep), and the 'one-eye lottery'.
   Figure 4  Survey of published studies: weighted estimates with 95% intervals.
   Figure S2 Variance of the estimated difference relative to the eye-weighted cluster analysis, with the
@@ -188,8 +189,99 @@ def figure1(s):
     fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.05), handletextpad=0.4,
                markerscale=1.6)
     fig.tight_layout(rect=(0, 0.10, 1, 1))
-    save(fig, "Figure2")
+    save(fig, "FigureS3")
 
+
+
+def figure_headline(s):
+    """Figure 2: the cost of the 2 shortcuts for any study, from the design effect (Kerry & Bland; Eldridge),
+    with the simulated settings and the observed-versus-predicted check."""
+    from matplotlib.colors import LinearSegmentedColormap
+    rr = np.linspace(0, 1, 301)
+    ff = np.linspace(0, 1, 301)
+    R, F = np.meshgrid(rr, ff)
+    T1 = np.vectorize(naive_pred)(F, R) * 100
+    EX = ((1 + F) ** 2 / (1 + F + 2 * F * R) - 1) * 100
+    h = s[(s.scen == "H0") & s.metric.isin(MEAN_METRICS) & s.rho_delta.notna()].copy()
+    h["rho"] = h.rho_delta.clip(lower=0)
+    pts = h[h.strategy == "cluster"].drop_duplicates(["cell", "metric"])
+
+    cmap_a = LinearSegmentedColormap.from_list("naive", ["#fdf0ea", COL["naive"], "#7a2a0b"])
+    cmap_b = LinearSegmentedColormap.from_list("oneeye", ["#e8f7f0", COL["one_eye"], "#0a5139"])
+    fig = plt.figure(figsize=(7.0, 6.4))
+    gs = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.42)
+    axA, axB, axC, axD = (fig.add_subplot(gs[i, j]) for i in range(2) for j in range(2))
+
+    im = axA.pcolormesh(R, F * 100, T1, cmap=cmap_a, vmin=5, vmax=17, shading="auto", rasterized=True)
+    from scipy.stats import norm as _norm
+    lev_a = [6, 8, 10, 12, 14]
+    cs = axA.contour(R, F * 100, T1, levels=lev_a, colors=INK, linewidths=0.5)
+    pos = []
+    for L, f in zip(lev_a, (0.30, 0.45, 0.55, 0.65, 0.68)):     # label each line inside the panel
+        de = (1.959964 / _norm.ppf(1 - L / 200)) ** 2
+        pos.append(((de - 1) * (1 + f) / (2 * f), f * 100))
+    axA.clabel(cs, fmt="%d%%", fontsize=6.5, inline_spacing=2, manual=pos)
+    cb = fig.colorbar(im, ax=axA, fraction=0.05, pad=0.03)
+    cb.set_label("Type I Error (%)")
+    cb.outline.set_linewidth(0.4)
+    axA.set_title("Eyes treated as independent", loc="left", color=INK)
+
+    EXm = np.ma.masked_less(EX, 0)
+    axB.pcolormesh(R, F * 100, np.where(EX < 0, 1, np.nan), cmap=LinearSegmentedColormap.from_list("g", [BAND, BAND]),
+                   shading="auto", rasterized=True)
+    im = axB.pcolormesh(R, F * 100, EXm, cmap=cmap_b, vmin=0, vmax=100, shading="auto", rasterized=True)
+    lev_b = [10, 25, 50, 75]
+    cs = axB.contour(R, F * 100, EX, levels=lev_b, colors=INK, linewidths=0.5)
+    pos = []
+    for E_, f in zip(lev_b, (0.50, 0.60, 0.72, 0.93)):
+        pos.append((((1 + f) ** 2 / (1 + E_ / 100) - (1 + f)) / (2 * f), f * 100))
+    axB.clabel(cs, fmt="+%d%%", fontsize=6.5, inline_spacing=2, manual=pos)
+    axB.contour(R, F * 100, EX, levels=[0], colors=INK2, linewidths=0.6, linestyles="--")
+    cb = fig.colorbar(im, ax=axB, fraction=0.05, pad=0.03)
+    cb.set_label("Extra Patients Needed (%)")
+    cb.outline.set_linewidth(0.4)
+    axB.text(0.98, 0.03, "Grey: eye weighting\nless precise than\none eye per patient", ha="right", va="bottom",
+             fontsize=6.3, color=INK2, transform=axB.transAxes)
+    axB.set_title("One eye per patient", loc="left", color=INK)
+
+    for ax in (axA, axB):
+        ax.scatter(pts.rho, pts.f_obs * 100, s=7, color="white", edgecolor=INK, linewidth=0.5, zorder=3)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 100)
+        ax.set_xlabel(r"Fellow-Eye Correlation of the Difference, $\rho_\Delta$")
+        ax.set_ylabel("Patients With Both Eyes (%)")
+
+    n = h[h.strategy == "naive"]
+    c = h[h.strategy == "cluster"]
+    lim = (0, 18)
+    axC.plot(lim, lim, color=INK2, lw=0.6)
+    axC.axhspan(4.0, 6.0, color=BAND, lw=0, zorder=0)
+    axC.scatter(n.pred_naive_type1 * 100, n.reject * 100, s=12, marker=MARK["naive"], color=COL["naive"],
+                edgecolor="white", linewidth=0.4, zorder=3, label="Eyes treated as independent")
+    axC.scatter(c.pred_naive_type1 * 100, c.reject * 100, s=12, marker=MARK["cluster"], color=COL["cluster"],
+                edgecolor="white", linewidth=0.4, zorder=3, label="Patient as the unit")
+    axC.set_xlim(lim)
+    axC.set_ylim(lim)
+    axC.set_xlabel("Predicted Type I Error, Eyes Independent (%)")
+    axC.set_ylabel("Observed Type I Error (%)")
+    axC.legend(loc="upper left", frameon=False, handletextpad=0.3, markerscale=1.2)
+    axC.set_title("Simulation check: type I error", loc="left", color=INK)
+
+    o = h[h.strategy == "one_eye"]
+    lim = (0.7, 1.95)
+    axD.plot(lim, lim, color=INK2, lw=0.6)
+    axD.scatter(o.pred_rel_var_one_eye, o.rel_var, s=12, marker=MARK["one_eye"], color=COL["one_eye"],
+                edgecolor="white", linewidth=0.4, zorder=3)
+    axD.set_xlim(lim)
+    axD.set_ylim(lim)
+    axD.set_xlabel("Predicted Variance Ratio, One Eye / Both Eyes")
+    axD.set_ylabel("Observed Variance Ratio")
+    axD.set_title("Simulation check: precision", loc="left", color=INK)
+    for ax in (axC, axD):
+        grid(ax, "both")
+    for ax, lab in zip((axA, axB, axC, axD), "ABCD"):
+        panel_label(ax, lab)
+    save(fig, "Figure2")
 
 def figure2(s):
     h = s[(s.scen == "H0") & s.metric.isin(MEAN_METRICS) & s.rho_delta.notna()].copy()
@@ -351,6 +443,7 @@ def tables(s):
 if __name__ == "__main__":
     s = load_main()
     figure_flow(s)
+    figure_headline(s)
     figure1(s)
     figure2(s)
     figure3()

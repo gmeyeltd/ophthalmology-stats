@@ -42,8 +42,9 @@ def patient_sizes(n_pat, frac_bilateral, rng):
     return np.where(rng.random(n_pat) < frac_bilateral, 2, 1)
 
 
-def continuous_study(n_pat, frac_bilateral, kappa, rho_c, shape, lambdas, rng):
-    """Returns (patient index per eye, errors as an n_eyes x n_models array)."""
+def continuous_study(n_pat, frac_bilateral, kappa, rho_c, shape, lambdas, rng, sigma_c2=SIGMA_C2):
+    """Returns (patient index per eye, errors as an n_eyes x n_models array). sigma_c2 is the within-eye
+    correlation of the two models' errors (0.8 in the main simulation; varied in the sensitivity analysis)."""
     sizes = patient_sizes(n_pat, frac_bilateral, rng)
     idx = np.repeat(np.arange(n_pat), sizes)
     n = len(idx)
@@ -51,7 +52,8 @@ def continuous_study(n_pat, frac_bilateral, kappa, rho_c, shape, lambdas, rng):
     E = np.empty((n, len(lambdas)))
     for r, lam in enumerate(lambdas):
         m = np.sqrt(kappa) * _std_draw(rng, shape, n_pat)[idx] + np.sqrt(1 - kappa) * _std_draw(rng, shape, n)
-        E[:, r] = np.sqrt(SIGMA_C2) * c + lam * np.sqrt(SIGMA_M2) * m
+        sigma_m2 = SIGMA_M2 if sigma_c2 == SIGMA_C2 else 1 - sigma_c2      # bit-identical to the main run
+        E[:, r] = np.sqrt(sigma_c2) * c + lam * np.sqrt(sigma_m2) * m
     if shape == "discrete":
         E = np.round(E, 1)
     return idx, E
