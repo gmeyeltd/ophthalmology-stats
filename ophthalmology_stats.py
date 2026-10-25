@@ -17,10 +17,10 @@ part generalises it to any model and to classifiers:
                sensitivity, specificity, accuracy        clustered McNemar (Yang, Sun & Hardin 2010)
 
 Every difference comes with a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down
-for the bootstrap tests, Hommel otherwise). For each metric the output also gives rho_delta, the fellow-eye
-correlation of the per-eye difference in loss between the two models, and the one-eye factor: how many times
-more patients a study keeping one eye per patient would need for the same precision (design effect for unequal
-cluster sizes; Kerry & Bland 2001). Mean-loss metrics can weight every eye equally (default), every patient
+for the bootstrap tests, Hommel otherwise). For each metric the output also gives ρΔ (column rho_delta), the
+fellow-eye correlation of the per-eye difference in loss between the two models, and the one-eye factor: how many
+times more patients a study keeping one eye per patient would need for the same precision (design effect for
+unequal cluster sizes; Kerry & Bland 2001). Mean-loss metrics can weight every eye equally (default), every patient
 equally, or use minimum-variance weights. Results can be given for subgroups, e.g. right and left eyes.
 
 Quick start
@@ -935,7 +935,7 @@ def _settings(settings):
 def fellow_eye_correlation(values, cluster_idx):
     """Pairwise intraclass correlation of a per-eye quantity between eyes of the same patient (rho).
 
-    Applied to the per-eye difference in loss between two models it gives rho_delta, the quantity that decides
+    Applied to the per-eye difference in loss between two models it gives ρΔ, the quantity that decides
     how much eye-level tests are misled and how much a second eye adds (Kerry & Bland 2001; Eldridge 2006)."""
     values = np.asarray(values, float)
     m = np.bincount(cluster_idx).astype(float)
@@ -1154,8 +1154,8 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
 
     Returns (wide, long, info): wide has one row per model pair with differences, CIs, p-values and adjusted
     p-values in the biometry_stats_advanced layout; long has one row per pair and metric, with the estimates for
-    each model, the fellow-eye correlation of the loss difference (rho_delta) and how many times more patients one
-    eye per patient would need (one_eye_factor); info describes the sample and the tests used.
+    each model, the fellow-eye correlation of the loss difference (ρΔ, column rho_delta) and how many times more
+    patients one eye per patient would need (one_eye_factor); info describes the sample and the tests used.
     """
     s = _settings(settings)
     task, models, patient, truth = _detect_columns(df, task, models, patient, truth)
@@ -1440,7 +1440,7 @@ def _methodology(long, task, has_clusters, s):
                                  else "Independent eyes (one eye per patient or no patient identifier)"),
          "Weighting of Eyes (mean-loss metrics)": {"eye": "Every eye counts once",
                                                    "patient": "Every patient counts once",
-                                                   "optimal": "Minimum-variance weights 1/(1 + (m - 1) rho_delta)"}
+                                                   "optimal": "Minimum-variance weights 1/(1 + (m - 1) ρΔ)"}
          [s["weighting"]]}
     label = {"bias": "Mean Error (MPE)", "mae": "MAE", "rmse": "RMSE", "medae": "MedAE", "sd": "SD",
              "within": "Proportion Within Tolerance", "auc": "AUC", "brier": "Brier Score", "logloss": "Log-Loss",
@@ -1453,9 +1453,9 @@ def _methodology(long, task, has_clusters, s):
         m["Tolerance (proportion within)"] = f"|error| <= {s['within']}"
     m["FWER Correction"] = ("Romano-Wolf (bootstrap tests) / Hommel (other tests)" if s["fwer_method"] == "romano_wolf"
                             else str(s["fwer_method"]))
-    m["Fellow-Eye Correlation"] = ("rho_delta: intraclass correlation of the per-eye difference in loss between the "
-                                   "two models; one_eye_factor: patients a one-eye study needs, relative to this "
-                                   "analysis (design effect)")
+    m["Fellow-Eye Correlation"] = ("ρΔ (rho_delta): intraclass correlation of the per-eye difference in loss "
+                                   "between the two models; one_eye_factor: patients a one-eye study needs, "
+                                   "relative to this analysis (design effect)")
     return m
 
 
@@ -1491,7 +1491,7 @@ def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=Non
 
 def write_results_to_excel(results, path):
     """Write the results (sheet 'Results'), the tests used ('Statistical Tests'), and every estimate with its CI,
-    rho_delta and one-eye factor ('Estimates')."""
+    ρΔ (rho_delta) and one-eye factor ('Estimates')."""
     with pd.ExcelWriter(path) as writer:
         write_advanced_stats_to_excel(results, writer, sheet_name="Results")
         if "long" in results.attrs:

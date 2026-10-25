@@ -28,8 +28,9 @@ used for the new metrics.
 Every difference between two models comes with a 95% confidence interval, a p-value and an adjusted p-value
 (Romano-Wolf step-down for the bootstrap tests, Hommel otherwise). For each metric the output also reports:
 
-* **rho_delta**: the fellow-eye correlation of the per-eye difference in loss between the two models. This,
-  not the correlation of the outcome itself, decides how far eye-level tests are misled and how much a second eye adds.
+* **ρΔ** (column `rho_delta`): the fellow-eye correlation of the per-eye difference in loss between the two
+  models. This, not the correlation of the outcome itself, decides how far eye-level tests are misled and how much
+  a second eye adds.
 * **one_eye_factor**: how many times more patients a study keeping one eye per patient would need for the same
   precision (design effect for unequal cluster sizes).
 
