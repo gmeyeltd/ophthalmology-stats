@@ -36,7 +36,7 @@ LOTTERY = os.path.join(HERE, "output_suite", "lottery")
 # colour follows the strategy in every figure (categorical slots validated for these combinations)
 COL = {"cluster": "#2a78d6", "naive": "#eb6834", "one_eye": "#1baf7a", "patient": "#eda100", "optimal": "#6250d6"}
 MARK = {"cluster": "o", "naive": "s", "one_eye": "^", "patient": "D", "optimal": "v"}
-LAB = {"cluster": "Patient-clustered analysis (eye-weighted)", "naive": "Eyes treated as independent",
+LAB = {"cluster": "Patient as the unit", "naive": "Eyes treated as independent",
        "one_eye": "One eye per patient", "patient": "Patient-averaged", "optimal": "Minimum-variance weights"}
 INK, INK2, GRID, BAND = "#0b0b0b", "#52514e", "#e4e3df", "#efeeea"
 MEAN_METRICS = ["bias", "mae", "rmse", "brier", "logloss"]
@@ -144,11 +144,11 @@ def figure_flow(s):
         box(x, 0.385, wcol, 0.20, body=t, edge=c, lw=1.4)
         arrow(x, 0.56, x, 0.485)
     box(xs[2], 0.135, wcol, 0.15, body=f"Eyes treated as\nindependent (e.g. DeLong,\neye-level bootstrap):\n"
-        f"type I error up to {naive_max:.2f}", edge=COL["naive"], lw=1.4)
+        f"type I error up to {100 * naive_max:.0f}%", edge=COL["naive"], lw=1.4)
     arrow(xs[2], 0.285, xs[2], 0.21, color=COL["naive"], dashed=True)
     ax.text(xs[2] + 0.012, 0.248, "if ignored", fontsize=6.5, color=COL["naive"], va="center")
-    ax.text(0.02, 0.03, "AI = artificial intelligence; GEE = generalised estimating equations; $\\rho_\\Delta$ = fellow-eye "
-            "correlation of the per-eye difference in loss between models.", fontsize=6.3, color=INK2, ha="left")
+    ax.text(0.02, 0.03, "AI = artificial intelligence; GEE = generalised estimating equations; $\\rho_\\Delta$ = correlation "
+            "between fellow eyes of the difference in error between 2 models.", fontsize=6.3, color=INK2, ha="left")
     save(fig, "Figure1")
 
 
@@ -162,26 +162,26 @@ def figure1(s):
         for j, f in enumerate((0.4, 0.8)):
             ax = axes[i, j]
             d = h[(h.task == task) & (h.frac == f)]
-            ax.axhspan(0.05 - mc, 0.05 + mc, color=BAND, lw=0, zorder=0)
-            ax.axhline(0.05, color=INK2, lw=0.6, zorder=1)
-            ax.plot(rr, [naive_pred(f, r) for r in rr], color=INK2, lw=1.2, zorder=2,
+            ax.axhspan(100 * (0.05 - mc), 100 * (0.05 + mc), color=BAND, lw=0, zorder=0)
+            ax.axhline(5, color=INK2, lw=0.6, zorder=1)
+            ax.plot(rr, [100 * naive_pred(f, r) for r in rr], color=INK2, lw=1.2, zorder=2,
                     label="Predicted from the design effect, eyes treated as independent")
             for st in ("naive", "one_eye", "cluster"):
                 x = d[d.strategy == st]
                 prop = x.metric.isin(PROP_METRICS)
-                ax.scatter(x.rho[~prop], x.reject[~prop], s=14, marker=MARK[st], color=COL[st], edgecolor="white",
+                ax.scatter(x.rho[~prop], 100 * x.reject[~prop], s=14, marker=MARK[st], color=COL[st], edgecolor="white",
                            linewidth=0.5, zorder=3, label=LAB[st])
-                ax.scatter(x.rho[prop], x.reject[prop], s=14, marker=MARK[st], facecolor="none", edgecolor=COL[st],
+                ax.scatter(x.rho[prop], 100 * x.reject[prop], s=14, marker=MARK[st], facecolor="none", edgecolor=COL[st],
                            linewidth=0.8, zorder=3)
             grid(ax)
-            ax.set_ylim(0, 0.20)
+            ax.set_ylim(0, 20)
             ax.set_xlim(-0.02, 1.0)
             title = "Continuous outputs" if task == "continuous" else "Classifiers"
             ax.set_title(f"{title}, {int(f * 100)}% of patients bilateral", loc="left", color=INK)
             if j == 0:
-                ax.set_ylabel("Type I Error (Nominal 0.05)")
+                ax.set_ylabel("Type I Error (%)")
             if i == 1:
-                ax.set_xlabel(r"Fellow-Eye Correlation of the Per-Eye Loss Difference, $\rho_\Delta$")
+                ax.set_xlabel(r"Fellow-Eye Correlation of the Difference in Error, $\rho_\Delta$")
             panel_label(ax, "ABCD"[2 * i + j])
     h_, l_ = axes[0, 0].get_legend_handles_labels()
     h_.append(plt.Line2D([], [], ls="none", marker="o", markersize=4, markerfacecolor="none", markeredgecolor=INK2))
@@ -189,7 +189,7 @@ def figure1(s):
     fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.05), handletextpad=0.4,
                markerscale=1.6)
     fig.tight_layout(rect=(0, 0.10, 1, 1))
-    save(fig, "FigureS3")
+    save(fig, "FigureS1")
 
 
 
@@ -208,9 +208,9 @@ def figure_headline(s):
 
     cmap_a = LinearSegmentedColormap.from_list("naive", ["#fdf0ea", COL["naive"], "#7a2a0b"])
     cmap_b = LinearSegmentedColormap.from_list("oneeye", ["#e8f7f0", COL["one_eye"], "#0a5139"])
-    fig = plt.figure(figsize=(7.0, 6.4))
-    gs = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.42)
-    axA, axB, axC, axD = (fig.add_subplot(gs[i, j]) for i in range(2) for j in range(2))
+    fig = plt.figure(figsize=(7.0, 3.2))
+    gs = fig.add_gridspec(1, 2, wspace=0.42)
+    axA, axB = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
 
     im = axA.pcolormesh(R, F * 100, T1, cmap=cmap_a, vmin=5, vmax=17, shading="auto", rasterized=True)
     from scipy.stats import norm as _norm
@@ -251,6 +251,16 @@ def figure_headline(s):
         ax.set_xlabel(r"Fellow-Eye Correlation of the Difference, $\rho_\Delta$")
         ax.set_ylabel("Patients With Both Eyes (%)")
 
+    for ax, lab in zip((axA, axB), "AB"):
+        panel_label(ax, lab)
+    save(fig, "Figure2")
+
+def figure_check(s):
+    """Supplementary Figure S2: observed against predicted type I error and one-eye variance in the simulation."""
+    h = s[(s.scen == "H0") & s.metric.isin(MEAN_METRICS) & s.rho_delta.notna()].copy()
+    fig = plt.figure(figsize=(7.0, 3.3))
+    gs = fig.add_gridspec(1, 2, wspace=0.38)
+    axC, axD = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
     n = h[h.strategy == "naive"]
     c = h[h.strategy == "cluster"]
     lim = (0, 18)
@@ -279,9 +289,10 @@ def figure_headline(s):
     axD.set_title("Simulation check: precision", loc="left", color=INK)
     for ax in (axC, axD):
         grid(ax, "both")
-    for ax, lab in zip((axA, axB, axC, axD), "ABCD"):
+    for ax, lab in zip((axC, axD), "AB"):
         panel_label(ax, lab)
-    save(fig, "Figure2")
+    save(fig, "FigureS2")
+
 
 def figure2(s):
     h = s[(s.scen == "H0") & s.metric.isin(MEAN_METRICS) & s.rho_delta.notna()].copy()
@@ -305,62 +316,69 @@ def figure2(s):
         ax.set_xlim(-0.02, 1.0)
         ax.set_ylim(0.6, 2.0 if f == 0.8 else 1.6)
         ax.set_title(f"{int(f * 100)}% of patients bilateral", loc="left")
-        ax.set_xlabel(r"Fellow-Eye Correlation of the Loss Difference, $\rho_\Delta$")
+        ax.set_xlabel(r"Fellow-Eye Correlation of the Difference in Error, $\rho_\Delta$")
         panel_label(ax, "AB"[j])
     axes[0].set_ylim(0.6, 2.0)
-    axes[0].set_ylabel("Variance Relative to Eye-Weighted\nCluster Analysis (1 = Equal)")
+    axes[0].set_ylabel("Variance Relative to Patient as the\nUnit, Equal Eye Weights (1 = Equal)")
     h_, l_ = axes[0].get_legend_handles_labels()
     fig.legend(h_, l_, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.04), handletextpad=0.3,
                markerscale=1.6)
     fig.tight_layout(rect=(0, 0.06, 1, 1))
-    save(fig, "FigureS2")
+    save(fig, "FigureS3")
 
 
 def figure3():
+    """Figure 3: power against study size (patient as the unit vs one eye per patient)."""
     sw = pd.read_csv(os.path.join(RES, "summary_sweep.csv"))
-    fig, axes = plt.subplots(2, 2, figsize=(7.0, 5.2))
-    for j, (task, metric, title) in enumerate((("continuous", "mae", "Continuous outputs (MAE)"),
-                                               ("binary", "auc", "Classifiers (AUC)"))):
-        ax = axes[0, j]
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.9))
+    for j, (task, metric, title) in enumerate((("continuous", "mae", "Mean absolute error"),
+                                               ("binary", "auc", "Area under the curve"))):
+        ax = axes[j]
         d = sw[(sw.task == task) & (sw.metric == metric) & (sw.scen == "H1") & (sw.frac == 0.8)]
         for st in ("cluster", "one_eye"):
             x = d[d.strategy == st].sort_values("n_patients")
-            ax.plot(x.n_patients, x.reject, color=COL[st], lw=1.5, marker=MARK[st], ms=4, mec="white", mew=0.5,
-                    label=LAB[st])
-        ax.axhline(0.8, color=INK2, lw=0.6)
+            ax.plot(x.n_patients, 100 * x.reject, color=COL[st], lw=1.5, marker=MARK[st], ms=4, mec="white",
+                    mew=0.5, label=LAB[st])
+        ax.axhline(80, color=INK2, lw=0.6)
         grid(ax)
-        ax.set_ylim(0, 1.02)
+        ax.set_ylim(0, 102)
         ax.set_xlim(0, 1020)
         ax.set_xlabel("Patients per Study")
         if j == 0:
-            ax.set_ylabel("Power")
-        ax.set_title(title + ", 80% bilateral", loc="left")
+            ax.set_ylabel("Power (%)")
+        ax.set_title(title, loc="left")
         panel_label(ax, "AB"[j])
+    h_, l_ = axes[0].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.03))
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    save(fig, "Figure3")
+
+
+def figure_lottery():
+    """Supplementary Figure S4: how often a one-eye study's significance depends on the eye kept."""
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0))
     for j, task in enumerate(("continuous", "binary")):
-        ax = axes[1, j]
+        ax = axes[j]
         d = pd.read_csv(os.path.join(LOTTERY, f"lottery_{task}.csv.gz"))
         bins = np.linspace(0, 1, 11)
         cnt, _ = np.histogram(d.one_eye_frac_sig, bins=bins)
-        ax.bar(bins[:-1] + 0.05, cnt / len(d), width=0.1 - 0.012, color=COL["one_eye"], zorder=2)
+        ax.bar(100 * (bins[:-1] + 0.05), 100 * cnt / len(d), width=10 - 1.2, color=COL["one_eye"], zorder=2)
         grid(ax)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, max(0.45, (cnt / len(d)).max() + 0.05))
-        ax.set_xlabel("Proportion of One-Eye Draws With P < 0.05")
+        ax.set_xlim(0, 100)
+        ax.set_ylim(0, max(45, 100 * (cnt / len(d)).max() + 5))
+        ax.set_xlabel("Choices of Eye Giving P < 0.05 (%)")
         if j == 0:
-            ax.set_ylabel("Proportion of Simulated Studies")
+            ax.set_ylabel("Simulated Studies (%)")
         mid = ((d.one_eye_frac_sig >= 0.1) & (d.one_eye_frac_sig <= 0.9)).mean()
         chg = (d.one_eye_n_distinct_top > 1).mean()
-        ax.text(0.03, 0.97, f"Significant in 10%-90% of draws: {mid:.0%} of studies\n"
-                f"Top-ranked model changes with the draw: {chg:.0%}\n"
-                f"Clustered analysis significant: {d.cluster_sig.mean():.0%}",
+        ax.text(0.03, 0.97, f"Significant with 10%-90% of choices: {mid:.0%} of studies\n"
+                f"Top-ranked model changes with the eye: {chg:.0%}\n"
+                f"Patient as the unit, significant: {d.cluster_sig.mean():.0%}",
                 transform=ax.transAxes, va="top", fontsize=7, color=INK2)
-        ax.set_title(("Continuous outputs" if task == "continuous" else "Classifiers")
-                     + ": the one-eye lottery", loc="left")
-        panel_label(ax, "CD"[j])
-    h_, l_ = axes[0, 0].get_legend_handles_labels()
-    fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.02))
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
-    save(fig, "Figure3")
+        ax.set_title("Continuous outputs" if task == "continuous" else "Classifiers", loc="left")
+        panel_label(ax, "AB"[j])
+    fig.tight_layout()
+    save(fig, "FigureS4")
 
 
 AUDIT_ROWS = [
@@ -369,17 +387,20 @@ AUDIT_ROWS = [
     ("Image- or eye-level split (of both-eyes studies)", "Image- or eye-level split"),
     ("No uncertainty reported (of both-eyes studies)", "No CI or SE for performance"),
     ("Uncertainty assuming independence (of both-eyes studies)", "CI or test assuming independent eyes"),
-    ("Clustered uncertainty (of both-eyes studies) [primary]", "Patient-clustered CI or test"),
+    ("Clustered uncertainty (of both-eyes studies) [primary]", "Patient-level CI or test"),
     ("Correlation acknowledged (of both-eyes studies)", "Fellow-eye correlation acknowledged"),
     ("Statistical test of models (of both-eyes studies)", "Statistical test between models"),
 ]
 
 
 def figure4():
+    """Figure 4: survey estimates; the top row has all eligible studies as denominator, the others the studies
+    with both eyes of some patients."""
     r = pd.read_csv(AUDIT)
     r = r[r.analysis == "corpus estimate (two-phase)"].set_index("item")
-    fig, ax = plt.subplots(figsize=(7.0, 3.5))
-    y = np.arange(len(AUDIT_ROWS))[::-1]
+    fig, ax = plt.subplots(figsize=(7.0, 3.7))
+    n = len(AUDIT_ROWS)
+    y = np.r_[n - 0.3, np.arange(n - 1)[::-1]].astype(float)      # gap between the 2 denominators
     for yy, (key, lab) in zip(y, AUDIT_ROWS):
         e = r.loc[key]
         ax.plot([e.estimate_lo, e.estimate_hi], [yy, yy], color=COL["cluster"], lw=1.6, solid_capstyle="round")
@@ -387,14 +408,18 @@ def figure4():
         ax.text(1.005, yy, f"{e.estimate:.0%} ({e.estimate_lo:.0%}-{e.estimate_hi:.0%})", va="center", fontsize=7,
                 color=INK, transform=ax.get_yaxis_transform())
     ax.set_yticks(y)
-    ax.set_yticklabels([lab for _, lab in AUDIT_ROWS])
-    ax.axhline(y[0] - 0.5, color=GRID, lw=0.6)
+    ax.set_yticklabels([lab.replace("\n(of eligible studies)", "") for _, lab in AUDIT_ROWS])
+    for yy, txt in ((n + 0.45, "Of eligible studies"), (n - 1.3, "Of eligible studies with both eyes of some patients")):
+        ax.text(-0.005, yy, txt, transform=ax.get_yaxis_transform(), ha="right", va="center", fontsize=7.3,
+                fontweight="bold", color=INK)
+    ax.axhline(n - 0.85, color=GRID, lw=0.8)
+    ax.set_ylim(-0.7, n + 0.9)
     ax.set_xlim(0, 0.8)
-    ax.text(1.005, y[0] + 0.75, "Estimate\n(95% CI)", va="bottom", fontsize=7, color=INK2,
+    ax.text(1.005, n + 0.45, "Estimate\n(95% CI)", va="center", fontsize=7, color=INK2,
             transform=ax.get_yaxis_transform())
     ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=0))
     grid(ax, "x")
-    ax.set_xlabel("Estimated Proportion of Open-Access Studies (Rows 2-8: of Studies With Both Eyes of Some Patients)")
+    ax.set_xlabel("Estimated Percentage of Open-Access Studies")
     ax.tick_params(axis="y", length=0)
     fig.tight_layout()
     save(fig, "Figure4")
@@ -411,11 +436,11 @@ def tables(s):
         row = {"task": task, "metric": fam.get(metric, metric)}
         for st in ("naive", "one_eye", "cluster", "patient", "optimal"):
             x = g[(g.strategy == st) & (g.scen == "H0")].reject
-            row[f"type1_{st}"] = f"{x.min():.3f}-{x.max():.3f}" if len(x) else ""
+            row[f"type1_{st}"] = f"{100 * x.min():.1f}-{100 * x.max():.1f}" if len(x) else ""
             p = g[(g.strategy == st) & (g.scen == "H1")].reject
-            row[f"power_{st}"] = f"{p.min():.2f}-{p.max():.2f}" if len(p) else ""
+            row[f"power_{st}"] = f"{100 * p.min():.0f}-{100 * p.max():.0f}" if len(p) else ""
         c = g[(g.strategy == "cluster") & (g.scen == "H0")].coverage
-        row["cluster_coverage"] = f"{c.min():.3f}-{c.max():.3f}" if c.notna().any() else ""
+        row["cluster_coverage"] = f"{100 * c.min():.1f}-{100 * c.max():.1f}" if c.notna().any() else ""
         rd = g[(g.strategy == "cluster") & (g.scen == "H0")].rho_delta
         row["rho_delta"] = f"{max(rd.min(), 0):.2f}-{rd.max():.2f}" if rd.notna().any() else ""
         rows.append(row)
@@ -444,9 +469,11 @@ if __name__ == "__main__":
     s = load_main()
     figure_flow(s)
     figure_headline(s)
+    figure_check(s)
     figure1(s)
     figure2(s)
     figure3()
+    figure_lottery()
     if os.path.exists(AUDIT):
         figure4()
     tables(s)

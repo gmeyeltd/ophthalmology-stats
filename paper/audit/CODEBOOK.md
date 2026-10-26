@@ -54,7 +54,7 @@ If not stated for the test set, code the whole dataset.
 **Yes** if the paper mentions the correlation or non-independence of fellow eyes, or of several images from one patient, or says the analysis accounted for clustering. This can be anywhere, including the Discussion.
 
 ## Decision rules for common borderline cases
-Agreed during development (22 Oct 2026), before validation coding. Both coders apply them.
+Agreed during development (22 Oct 2026), before validation coding. The coder applies them.
 - **Eligibility**
   - Not eligible: AI used only as a measuring or alignment tool in an association study; non-ocular inputs (blood, questionnaires, brain MRI or fMRI, dental images); large language models answering questions; psychophysics.
   - Eligible: tear fluid, orbital CT, eyelid photographs, surgical video and ocular examination findings all count as ocular inputs.
