@@ -171,6 +171,35 @@ def test_model_performance():
     check("patient-level CIs are wider than eye-level CIs when fellow eyes are alike", wp > we)
 
 
+def test_adjusted_cis():
+    lbl = "95% CI"
+    df = iol_like_data(seed=5).drop(columns=["eye"])
+    wide, long, _ = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 999, "verbose": False})
+    ok_contain, ok_wider, ok_consistent = True, True, True
+    for m in ("MPE", "MAE", "MedAE"):
+        d, lo, hi = wide[f"{m} Diff"], wide[f"{m} Diff {lbl} adj low"], wide[f"{m} Diff {lbl} adj high"]
+        ok_contain &= bool(((lo <= d) & (d <= hi)).all())
+        ok_wider &= bool(((hi - lo) >= (wide[f"{m} Diff {lbl} high"] - wide[f"{m} Diff {lbl} low"])).mean() >= 0.8)
+        excl = (lo > 0) | (hi < 0)                     # single-step interval excludes 0 -> step-down p_adj below 0.05
+        ok_consistent &= bool((wide.loc[excl, f"Boot ({m}) p_adj"] <= 0.05 + 1e-12).all())
+    check("adjusted CIs contain the difference (MPE, MAE, MedAE)", ok_contain)
+    check("adjusted CIs are wider than unadjusted ones", ok_wider)
+    check("an adjusted CI excluding 0 always has Romano-Wolf p_adj <= 0.05", ok_consistent)
+    check("no adjusted RMSE interval under the bootstrap-t", not any("RMSE" in c and "adj low" in c for c in wide.columns))
+    lmae = long[long.metric == "mae"]
+    check("long table carries the adjusted CIs", np.allclose(lmae["ci_adj_low"].values, wide[f"MAE Diff {lbl} adj low"].values))
+    w1, _, _ = osx.compare_models(df[["patient_id", "F0", "F1"]], task="continuous",
+                                  settings={"bootstrap_iterations": 499, "verbose": False})
+    check("single comparison: adjusted CI equals the unadjusted CI",
+          np.allclose(w1[f"MAE Diff {lbl} adj low"], w1[f"MAE Diff {lbl} low"]) and
+          np.allclose(w1[f"MAE Diff {lbl} adj high"], w1[f"MAE Diff {lbl} high"]))
+    w0, _, _ = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 499, "report_ci": False, "verbose": False})
+    check("no adjusted CIs when report_ci is off", not any(" adj " in c for c in w0.columns))
+    wb, _, _ = osx.compare_models(binary_data(), task="binary", truth="truth",
+                                  settings={"bootstrap_iterations": 499, "verbose": False})
+    check("binary: adjusted CIs for Brier and log-loss", all(f"{m} Diff {lbl} adj low" in wb.columns for m in ("Brier", "LogLoss")))
+
+
 def test_ties():
     d = np.zeros(999)
     check("identical models give p = 1 (ties counted in both tails)", osx._calculate_percentile_bootstrap_p(d) == 1.0)

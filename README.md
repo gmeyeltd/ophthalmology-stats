@@ -28,7 +28,14 @@ used for the new metrics.
 Each model's own performance on every metric is given with a patient-level 95% confidence interval (percentile
 bootstrap resampling patients, so that fellow eyes stay together). Every difference between two models comes with
 a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down for the bootstrap tests,
-Hommel otherwise). For each metric the output also reports:
+Hommel otherwise). The unadjusted interval can exclude zero next to a non-significant adjusted p-value, so MPE, MAE,
+MedAE, Brier score and log-loss differences also get an adjusted (simultaneous) 95% interval, in the columns ending
+`CI adj low` / `CI adj high` (`ci_adj_low` / `ci_adj_high` in the Estimates sheet): the difference ± c × its standard
+error, where c is the quantile of the largest bootstrap |t| across all the comparisons in the group, i.e. the
+single-step max-|t| interval that goes with Romano-Wolf. These intervals cover all the true differences together with
+95% probability and agree with the adjusted p-values. RMSE (tested on the MSE scale), SD, AUC and proportions have
+no adjusted interval; with a single comparison the adjusted interval equals the unadjusted one. For each metric the
+output also reports:
 
 * **ρΔ** (column `rho_delta`): the fellow-eye correlation of the per-eye difference in loss between the two
   models. This, not the correlation of the outcome itself, decides how far eye-level tests are misled and how much
