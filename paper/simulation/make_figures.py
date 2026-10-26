@@ -12,7 +12,8 @@ audit/audit_03_validation.py --score).
   Figure S2 Variance of the estimated difference relative to the eye-weighted cluster analysis, with the
             analytic curves (one eye per patient, patient-averaged, minimum-variance weights).
 
-Writes figures/Figure{1-4}.tiff and FigureS2.tiff (600 dpi, LZW) with .png previews, and results/table1_simulation.csv,
+Writes figures/Figure1-3.tiff and FigureS2-S6.tiff (600 dpi, LZW) with .png previews (Figure 4 and Supplementary
+Figure S1 come from realdata/papila_figure.py and manuscript/build_supplement.py), and results/table1_simulation.csv,
 results/table_s_type1_by_metric.csv.
 
 Usage (from this folder):  python make_figures.py
@@ -32,6 +33,7 @@ RES = os.path.join(HERE, "results")
 FIG = os.path.join(HERE, "figures")
 AUDIT = os.path.join(HERE, "..", "audit", "audit_data", "validation_results.csv")
 LOTTERY = os.path.join(HERE, "output_suite", "lottery")
+PAPILA = os.path.join(HERE, "..", "realdata", "results", "papila_summary.json")   # worked example (papila_example.py)
 
 # colour follows the strategy in every figure (categorical slots validated for these combinations)
 COL = {"cluster": "#2a78d6", "naive": "#eb6834", "one_eye": "#1baf7a", "patient": "#eda100", "optimal": "#6250d6"}
@@ -189,7 +191,7 @@ def figure1(s):
     fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.05), handletextpad=0.4,
                markerscale=1.6)
     fig.tight_layout(rect=(0, 0.10, 1, 1))
-    save(fig, "FigureS1")
+    save(fig, "FigureS2")
 
 
 
@@ -244,8 +246,13 @@ def figure_headline(s):
              fontsize=6.3, color=INK2, transform=axB.transAxes)
     axB.set_title("One eye per patient", loc="left", color=INK)
 
+    rd = papila_points()
     for ax in (axA, axB):
-        ax.scatter(pts.rho, pts.f_obs * 100, s=7, color="white", edgecolor=INK, linewidth=0.5, zorder=3)
+        ax.scatter(pts.rho, pts.f_obs * 100, s=7, color="white", edgecolor=INK, linewidth=0.5, zorder=3,
+                   label="Simulated settings")
+        if len(rd):
+            ax.scatter(rd.rho, rd.f * 100, s=42, marker="*", color=INK, edgecolor="white", linewidth=0.4, zorder=5,
+                       clip_on=False, label="PAPILA comparisons")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 100)
         ax.set_xlabel(r"Fellow-Eye Correlation of the Difference, $\rho_\Delta$")
@@ -253,7 +260,26 @@ def figure_headline(s):
 
     for ax, lab in zip((axA, axB), "AB"):
         panel_label(ax, lab)
-    save(fig, "Figure2")
+    if len(rd):
+        h_, l_ = axA.get_legend_handles_labels()
+        fig.legend(h_, l_, loc="lower center", bbox_to_anchor=(0.5, -0.07), ncol=2, frameon=False, fontsize=7)
+    save(fig, "Figure3")
+
+
+def papila_points():
+    """Comparisons in the worked example with a defined rho_delta (negative values shown at 0, as for the simulation)."""
+    import json
+    if not os.path.exists(PAPILA):
+        return pd.DataFrame(columns=["rho", "f"])
+    d = json.load(open(PAPILA))
+    rows = []
+    for task in ("glaucoma", "axial_length"):
+        g = d[task]
+        f = g["n_bilateral"] / g["n_patients"]
+        for p in g["pairs"]:
+            if p["rho_delta"] is not None and p["rho_delta"] == p["rho_delta"]:
+                rows.append({"rho": max(p["rho_delta"], 0.0), "f": f, "metric": p["metric"]})
+    return pd.DataFrame(rows)
 
 def figure_check(s):
     """Supplementary Figure S2: observed against predicted type I error and one-eye variance in the simulation."""
@@ -291,7 +317,7 @@ def figure_check(s):
         grid(ax, "both")
     for ax, lab in zip((axC, axD), "AB"):
         panel_label(ax, lab)
-    save(fig, "FigureS2")
+    save(fig, "FigureS3")
 
 
 def figure2(s):
@@ -324,7 +350,7 @@ def figure2(s):
     fig.legend(h_, l_, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.04), handletextpad=0.3,
                markerscale=1.6)
     fig.tight_layout(rect=(0, 0.06, 1, 1))
-    save(fig, "FigureS3")
+    save(fig, "FigureS4")
 
 
 def figure3():
@@ -351,7 +377,7 @@ def figure3():
     h_, l_ = axes[0].get_legend_handles_labels()
     fig.legend(h_, l_, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.03))
     fig.tight_layout(rect=(0, 0.07, 1, 1))
-    save(fig, "Figure3")
+    save(fig, "FigureS5")
 
 
 def figure_lottery():
@@ -378,7 +404,7 @@ def figure_lottery():
         ax.set_title("Continuous outputs" if task == "continuous" else "Classifiers", loc="left")
         panel_label(ax, "AB"[j])
     fig.tight_layout()
-    save(fig, "FigureS4")
+    save(fig, "FigureS6")
 
 
 AUDIT_ROWS = [
@@ -393,21 +419,72 @@ AUDIT_ROWS = [
 ]
 
 
-def figure4():
-    """Figure 4: survey estimates; the top row has all eligible studies as denominator, the others the studies
-    with both eyes of some patients."""
+ICONS = [  # (item in validation_results.csv, label, colour); the first 3 split the both-eyes studies
+    ("No uncertainty reported (of both-eyes studies)", "Both eyes: no CI for performance", INK2),
+    ("Uncertainty assuming independence (of both-eyes studies)", "Both eyes: CI or test assuming independent eyes",
+     COL["naive"]),
+    ("Clustered uncertainty (of both-eyes studies) [primary]", "Both eyes: patient-level CI or test", COL["cluster"]),
+    ("One eye per patient (of eligible)", "One eye, or one output, per patient", "#a9a8a3"),
+    ("Several images, eyes unclear (of eligible)", "Eyes per patient unclear or not reported", "#dcdbd6"),
+]
+
+
+def _largest_remainder(x, total):
+    x = np.asarray(x, float) * total / np.sum(x)
+    n = np.floor(x).astype(int)
+    n[np.argsort(-(x - n))[:total - n.sum()]] += 1
+    return n
+
+
+def survey_icons(r):
+    """Counts per 100 eligible studies: both eyes split by analysis; the rest by what they reported."""
+    e = r["estimate"]
+    both = e["Both eyes in the evaluation data (of eligible)"]
+    parts = [both * e[k] for k, _, _ in ICONS[:3]]
+    parts.append(e["One eye per patient (of eligible)"] + e["Patient-level model (of eligible)"])
+    parts.append(e["Several images, eyes unclear (of eligible)"] + e["Eyes per patient not reported (of eligible)"])
+    n_both = int(round(100 * both))
+    top = _largest_remainder(parts[:3], n_both)
+    rest = _largest_remainder(parts[3:], 100 - n_both)
+    return [int(v) for v in top] + [int(v) for v in rest]
+
+
+def figure_survey():
+    """Figure 2: what 100 published ophthalmic AI studies did with the second eye (A), and the estimates with their
+    95% CIs (B); the top row of B has all eligible studies as denominator, the others the studies with both eyes."""
     r = pd.read_csv(AUDIT)
     r = r[r.analysis == "corpus estimate (two-phase)"].set_index("item")
-    fig, ax = plt.subplots(figsize=(7.0, 3.7))
+    counts = survey_icons(r)
+    fig = plt.figure(figsize=(7.0, 5.0))
+    gs = fig.add_gridspec(2, 2, height_ratios=[0.45, 1.05], width_ratios=[1.0, 0.72], hspace=0.22, wspace=0.02)
+    axA = fig.add_subplot(gs[0, 0])
+    cols = np.concatenate([[c] * n for (_, _, c), n in zip(ICONS, counts)])
+    k = np.arange(100)
+    x, y = k % 20, 4 - k // 20                                       # 5 rows of 20, filled from the top left
+    axA.scatter(x, y, s=95, marker="s", c=list(cols), edgecolor="white", linewidth=0.8)
+    axA.set_xlim(-0.8, 19.8)
+    axA.set_ylim(-0.8, 4.8)
+    axA.set_aspect("equal")
+    axA.axis("off")
+    from matplotlib.lines import Line2D
+    hand = [Line2D([], [], marker="s", ls="", ms=8, color=c, mec="white") for _, _, c in ICONS]
+    labs = [f"{n}  {lab}" for (_, lab, _), n in zip(ICONS, counts)]
+    axL = fig.add_subplot(gs[0, 1])
+    axL.axis("off")
+    axL.legend(hand, labs, loc="center left", frameon=False, fontsize=7.3, handletextpad=0.4, labelspacing=0.7)
+    axA.set_title("Of every 100 eligible ophthalmic AI studies", loc="left", color=INK)
+    axA.text(-0.05, 1.04, "A", transform=axA.transAxes, fontsize=10, fontweight="bold", va="bottom", ha="right")
+
+    ax = fig.add_subplot(gs[1, :])
     n = len(AUDIT_ROWS)
-    y = np.r_[n - 0.3, np.arange(n - 1)[::-1]].astype(float)      # gap between the 2 denominators
-    for yy, (key, lab) in zip(y, AUDIT_ROWS):
+    yy_ = np.r_[n - 0.3, np.arange(n - 1)[::-1]].astype(float)      # gap between the 2 denominators
+    for yy, (key, lab) in zip(yy_, AUDIT_ROWS):
         e = r.loc[key]
         ax.plot([e.estimate_lo, e.estimate_hi], [yy, yy], color=COL["cluster"], lw=1.6, solid_capstyle="round")
         ax.scatter(e.estimate, yy, s=30, color=COL["cluster"], edgecolor="white", linewidth=0.8, zorder=3)
         ax.text(1.005, yy, f"{e.estimate:.0%} ({e.estimate_lo:.0%}-{e.estimate_hi:.0%})", va="center", fontsize=7,
                 color=INK, transform=ax.get_yaxis_transform())
-    ax.set_yticks(y)
+    ax.set_yticks(yy_)
     ax.set_yticklabels([lab.replace("\n(of eligible studies)", "") for _, lab in AUDIT_ROWS])
     for yy, txt in ((n + 0.45, "Of eligible studies"), (n - 1.3, "Of eligible studies with both eyes of some patients")):
         ax.text(-0.005, yy, txt, transform=ax.get_yaxis_transform(), ha="right", va="center", fontsize=7.3,
@@ -421,8 +498,8 @@ def figure4():
     grid(ax, "x")
     ax.set_xlabel("Estimated Percentage of Open-Access Studies")
     ax.tick_params(axis="y", length=0)
-    fig.tight_layout()
-    save(fig, "Figure4")
+    ax.text(-0.75, 1.04, "B", transform=ax.transAxes, fontsize=10, fontweight="bold", va="bottom")
+    save(fig, "Figure2")
 
 
 def tables(s):
@@ -475,5 +552,5 @@ if __name__ == "__main__":
     figure3()
     figure_lottery()
     if os.path.exists(AUDIT):
-        figure4()
+        figure_survey()
     tables(s)

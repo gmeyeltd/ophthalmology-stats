@@ -1,8 +1,8 @@
-"""Supplementary Figure S5: the PAPILA comparisons analysed with the patient as the unit, with eyes treated as
+"""Figure 4: the PAPILA comparisons analysed with the patient as the unit, with eyes treated as
 independent, and with one eye per patient over 200 random choices of eye.
 
 Run after papila_example.py:  python papila_figure.py [--results results]
-Writes figures/FigureS5.tiff (600 dpi, LZW, RGB) and figures/FigureS5.png.
+Writes figures/Figure4.tiff (600 dpi, LZW, RGB) and figures/Figure4.png.
 """
 import argparse
 import json
@@ -79,13 +79,13 @@ def main():
               handletextpad=0.3, columnspacing=1.2)
     fig.tight_layout()
     os.makedirs(a.out, exist_ok=True)
-    fig.savefig(os.path.join(a.out, "FigureS5.png"), dpi=200, bbox_inches="tight")
-    tif = os.path.join(a.out, "FigureS5.tiff")
+    fig.savefig(os.path.join(a.out, "Figure4.png"), dpi=200, bbox_inches="tight")
+    tif = os.path.join(a.out, "Figure4.tiff")
     fig.savefig(tif, dpi=600, bbox_inches="tight", pil_kwargs={"compression": "tiff_lzw"})
     plt.close(fig)
     from PIL import Image
     Image.open(tif).convert("RGB").save(tif, compression="tiff_lzw", dpi=(600, 600))
-    print("wrote", os.path.join(a.out, "FigureS5.tiff"))
+    print("wrote", os.path.join(a.out, "Figure4.tiff"))
 
 
 if __name__ == "__main__":

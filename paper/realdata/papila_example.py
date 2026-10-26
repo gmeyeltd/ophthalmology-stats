@@ -24,6 +24,7 @@ Usage (from this folder; Python 3.10+):
   pip install torch torchvision timm scikit-learn pillow openpyxl
   python papila_example.py --data "C:/path/to/PAPILA.zip" --pilot          # quick check (about 1 minute)
   python papila_example.py --data "C:/path/to/PAPILA.zip"                  # full run (about 5-10 minutes on CPU)
+  python papila_example.py --from-predictions                              # statistics only, from saved predictions
 The first run downloads the 2 network weights from Hugging Face (about 450 MB, cached afterwards).
 Outputs in ./results/: papila_summary.json (the numbers for the paper), papila_*_results.xlsx (full output of
 ophthalmology-stats), papila_lottery.csv, and papila_predictions.csv (per-eye predictions; derived from PAPILA, so
@@ -214,6 +215,7 @@ def summarise(task, models, l_pat, info, l_eye, l_one, lot, metric_main):
         out["pairs"].append({
             "metric": r.metric, "model_a": r.model_a, "model_b": r.model_b, "diff": r.diff,
             "ci": [r.ci_low, r.ci_high], "p_patient": r.p, "p_adj_patient": r.p_adj, "rho_delta": r.rho_delta,
+            "ci_adj": [getattr(r, "ci_adj_low", np.nan), getattr(r, "ci_adj_high", np.nan)],
             "one_eye_factor": r.one_eye_factor,
             "ci_eyes_independent": [e.loc[k, "ci_low"], e.loc[k, "ci_high"]] if k in e.index else None,
             "p_eyes_independent": float(e.loc[k, "p"]) if k in e.index else None,
@@ -236,12 +238,18 @@ def _top(g, metric):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True, help="PAPILA.zip from figshare, or the extracted folder")
+    ap.add_argument("--data", help="PAPILA.zip from figshare, or the extracted folder")
+    ap.add_argument("--from-predictions", action="store_true",
+                    help="re-run only the statistics from results/papila_predictions.csv (no images needed)")
     ap.add_argument("--cores", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--pilot", action="store_true", help="30 patients, few resamples: checks that everything runs")
     a = ap.parse_args()
     res = os.path.join(HERE, "results_pilot" if a.pilot else "results")
     os.makedirs(res, exist_ok=True)
+    if a.from_predictions:
+        return analyse_predictions(res)
+    if not a.data:
+        ap.error("--data is required (or use --from-predictions)")
     root = locate(a.data)
     d = clinical(root)
     if a.pilot:                                                 # 30 random patients, half with glaucoma or suspect
@@ -274,12 +282,31 @@ def main():
                                "regression", repeats, SEED)
     m_reg = list(NETWORKS)
 
+    cls.merge(reg, on=["patient_id", "eye"], how="outer", suffixes=("_glaucoma", "_axial_length")).to_csv(
+        os.path.join(res, "papila_predictions.csv"), index=False)
     summary = {"dataset": {"patients": int(d.patient_id.nunique()), "eyes": int(len(d)),
                            "glaucoma_eyes": int((d.diagnosis == 1).sum()), "suspect_eyes": int((d.diagnosis == 2).sum()),
                            "healthy_eyes": int((d.diagnosis == 0).sum()),
                            "patients_discordant_diagnosis": int(d.groupby("patient_id").truth.nunique().gt(1).sum()),
                            "fellow_eye_r_axial_length": float(al.pivot(index="patient_id", columns="eye",
                                                                        values="axial_length").corr().iloc[0, 1])}}
+    analyse(cls, m_cls, reg, m_reg, summary, res, B, draws)
+
+
+def analyse_predictions(res):
+    """Statistics only, from the saved out-of-fold predictions (the dataset summary is kept from the full run)."""
+    pr = pd.read_csv(os.path.join(res, "papila_predictions.csv"))
+    nets = list(NETWORKS)
+    cls = pr[["patient_id", "eye", "truth_glaucoma"] + [f"{m}_glaucoma" for m in nets] + ["Cup-to-disc ratio"]].dropna()
+    cls = cls.rename(columns={"truth_glaucoma": "truth", **{f"{m}_glaucoma": m for m in nets}}).reset_index(drop=True)
+    reg = pr[["patient_id", "eye", "truth_axial_length"] + [f"{m}_axial_length" for m in nets]].dropna()
+    reg = reg.rename(columns={"truth_axial_length": "truth", **{f"{m}_axial_length": m for m in nets}}).reset_index(drop=True)
+    with open(os.path.join(res, "papila_summary.json")) as f:
+        summary = {"dataset": json.load(f)["dataset"]}
+    analyse(cls, nets + ["Cup-to-disc ratio"], reg, nets, summary, res, 4999, LOTTERY)
+
+
+def analyse(cls, m_cls, reg, m_reg, summary, res, B, draws):
     for task, df, models, main_metric in (("binary", cls, m_cls, "auc"), ("continuous", reg, m_reg, "mae")):
         name = "glaucoma" if task == "binary" else "axial_length"
         print(f"\n{name}: {df.patient_id.nunique()} patients, {len(df)} eyes")
@@ -297,8 +324,6 @@ def main():
                 print(f"  {p['model_a']} vs {p['model_b']}: diff {p['diff']:.3f}; P patient {p['p_patient']:.4f}, "
                       f"eyes independent {p['p_eyes_independent']:.4f}, one eye {p['p_one_eye']:.4f}; "
                       f"one-eye draws significant {p['lottery_frac_significant']:.0%}")
-    cls.merge(reg, on=["patient_id", "eye"], how="outer", suffixes=("_glaucoma", "_axial_length")).to_csv(
-        os.path.join(res, "papila_predictions.csv"), index=False)
     with open(os.path.join(res, "papila_summary.json"), "w") as f:
         json.dump(summary, f, indent=1, default=float)
     print(f"\nwritten to {res}")
