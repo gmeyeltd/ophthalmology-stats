@@ -200,6 +200,27 @@ def test_adjusted_cis():
     check("binary: adjusted CIs for Brier and log-loss", all(f"{m} Diff {lbl} adj low" in wb.columns for m in ("Brier", "LogLoss")))
 
 
+def test_adjusted_cis_follow_fwer_method():
+    lbl = "95% CI"
+    df = iol_like_data(seed=5).drop(columns=["eye"])
+    widths, ok = {}, True
+    for method in ("romano_wolf", "bonferroni", "holm", "hommel", "fdr_bh"):
+        w, _, info = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 1999, "fwer_method": method,
+                                                                         "verbose": False})
+        for m in ("MPE", "MAE", "MedAE"):
+            lo, hi, pa = w[f"{m} Diff {lbl} adj low"], w[f"{m} Diff {lbl} adj high"], w[f"Boot ({m}) p_adj"]
+            ok &= bool((pa[(lo > 0) | (hi < 0)] <= 0.05 + 1e-9).all())   # excludes 0 -> significant under that method
+        widths[method] = float((w[f"MAE Diff {lbl} adj high"] - w[f"MAE Diff {lbl} adj low"]).mean())
+        ok &= method in info["methodology"]["Adjusted Confidence Intervals"].lower().replace("-", "_") or method != "romano_wolf"
+    check("adjusted CIs follow fwer_method: an interval excluding 0 is significant under that method", ok)
+    check("Holm and Hommel use the Bonferroni intervals", widths["holm"] == widths["bonferroni"] == widths["hommel"])
+    check("Bonferroni intervals are wider than the max-|t| (Romano-Wolf) intervals", widths["bonferroni"] > widths["romano_wolf"])
+    w, _, info = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 499, "fwer_method": "fdr_by",
+                                                                     "verbose": False})
+    check("no adjusted CIs for other methods, and the methodology says so",
+          not any(" adj " in c for c in w.columns) and info["methodology"]["Adjusted Confidence Intervals"].startswith("None"))
+
+
 def test_ties():
     d = np.zeros(999)
     check("identical models give p = 1 (ties counted in both tails)", osx._calculate_percentile_bootstrap_p(d) == 1.0)

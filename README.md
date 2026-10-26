@@ -29,12 +29,15 @@ Each model's own performance on every metric is given with a patient-level 95% c
 bootstrap resampling patients, so that fellow eyes stay together). Every difference between two models comes with
 a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down for the bootstrap tests,
 Hommel otherwise). The unadjusted interval can exclude zero next to a non-significant adjusted p-value, so MPE, MAE,
-MedAE, Brier score and log-loss differences also get an adjusted (simultaneous) 95% interval, in the columns ending
-`CI adj low` / `CI adj high` (`ci_adj_low` / `ci_adj_high` in the Estimates sheet): the difference ± c × its standard
-error, where c is the quantile of the largest bootstrap |t| across all the comparisons in the group, i.e. the
-single-step max-|t| interval that goes with Romano-Wolf. These intervals cover all the true differences together with
-95% probability and agree with the adjusted p-values. RMSE (tested on the MSE scale), SD, AUC and proportions have
-no adjusted interval; with a single comparison the adjusted interval equals the unadjusted one. For each metric the
+MedAE, Brier score and log-loss differences also get an adjusted 95% interval, in the columns ending `CI adj low` /
+`CI adj high` (`ci_adj_low` / `ci_adj_high` in the Estimates sheet): the difference ± c × its standard error, with c
+matching the `fwer_method` chosen for the adjusted p-values. Romano-Wolf (default) gives simultaneous max-|t|
+intervals (c is the quantile of the largest bootstrap |t| across the comparisons in the group). Bonferroni gives
+Bonferroni intervals. Holm and Hommel also get Bonferroni intervals, because these stepwise methods have no
+compatible finite intervals, so an interval can include 0 next to a significant adjusted p-value. Benjamini-Hochberg
+gives Benjamini-Yekutieli false-coverage-rate intervals. Other methods, RMSE (tested on the MSE scale), SD, AUC and
+proportions have no adjusted interval; with a single comparison the adjusted interval equals the unadjusted one.
+Bonferroni-type intervals use the far tail of the bootstrap distribution, so use more resamples (e.g. 9,999) with them. For each metric the
 output also reports:
 
 * **ρΔ** (column `rho_delta`): the fellow-eye correlation of the per-eye difference in loss between the two
