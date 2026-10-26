@@ -11,7 +11,7 @@ AI = os.path.join(HERE, "..", "..", "..")
 for sub, patterns in (("simulation", ["simulate.py", "dgm.py", "analyse_simulation.py", "make_figures.py"]),
                       ("audit", ["audit_01_fetch.py", "audit_02_extract.py", "audit_03_validation.py",
                                  "CODEBOOK.md", "development_set.csv"]),
-                     ("realdata", ["papila_example.py"])):
+                     ("realdata", ["papila_example.py", "papila_figure.py"])):
     os.makedirs(os.path.join(HERE, sub), exist_ok=True)
     for p in patterns:
         for f in glob.glob(os.path.join(AI, sub, p)):

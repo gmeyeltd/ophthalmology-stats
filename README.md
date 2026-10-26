@@ -101,7 +101,8 @@ laterality (for example after flipping left-eye images) performs similarly on bo
 biometry_stats_advanced and that the clustered AUC equals DeLong's when every patient has one eye. The Monte Carlo
 simulation that validates the type I error, power and precision of every test is in `paper/simulation`, with its
 random seeds. `paper/realdata/papila_example.py` repeats the comparison on real data: two image models and the
-cup-to-disc ratio on both eyes of the 244 patients in PAPILA (Kovalyk et al, Sci Data 2022;9:291). The images are
+cup-to-disc ratio on both eyes of the 244 patients in PAPILA (Kovalyk et al, Sci Data 2022;9:291), and
+`papila_figure.py` draws its figure. The images are
 not included; the script reads PAPILA.zip as downloaded from figshare (doi:10.6084/m9.figshare.14798004).
 
 ## Citation

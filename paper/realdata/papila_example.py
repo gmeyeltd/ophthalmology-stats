@@ -17,7 +17,8 @@ so every eye is scored by models that never saw that patient.
   Continuous   axial length (mm) from the photograph: standardise, 50 principal components, ridge regression.
 
 Each task is then analysed with ophthalmology-stats with the patient as the unit (default), with eyes treated as
-independent, and with one random eye per patient; the one-eye analysis is repeated over 200 random choices of eye.
+independent, and with one random eye per patient; the one-eye analysis is repeated over 200 random choices of eye
+(AUC and Brier score of the classifiers, MAE of axial length).
 
 Usage (from this folder; Python 3.10+):
   pip install torch torchvision timm scikit-learn pillow openpyxl
@@ -53,6 +54,7 @@ SIZE = 224
 N_PC = 50
 FOLDS, REPEATS = 5, 5
 LOTTERY = 200
+LOTTERY_METRICS = {"binary": ["auc", "brier"], "continuous": ["mae"]}   # metrics re-tested for each choice of eye
 
 
 # ----------------------------------------------------------------------------------------------- data
@@ -183,17 +185,17 @@ def compare(df, task, models, B, **extra):
     return l, info
 
 
-def lottery(df, task, models, metric, draws, B, seed):
+def lottery(df, task, models, metrics, draws, B, seed):
     """Keep one random eye per bilateral patient, many times: how often does the conclusion change?"""
     rng = np.random.default_rng(seed)
     rows = []
     for k in range(draws):
         keep = df.assign(_r=rng.random(len(df))).sort_values("_r").drop_duplicates("patient_id").drop(columns="_r")
-        st = {"bootstrap_iterations": B, "verbose": False, "seed": int(rng.integers(2 ** 31)), "metrics": [metric],
+        st = {"bootstrap_iterations": B, "verbose": False, "seed": int(rng.integers(2 ** 31)), "metrics": list(metrics),
               "report_ci": False}
         l = osx.compare_models(keep, task=task, models=models, patient="patient_id", truth="truth", settings=st)[1]
         for r in l.itertuples():
-            rows.append({"task": task, "draw": k, "metric": metric, "model_a": r.model_a, "model_b": r.model_b,
+            rows.append({"task": task, "draw": k, "metric": r.metric, "model_a": r.model_a, "model_b": r.model_b,
                          "est_a": r.est_a, "est_b": r.est_b, "diff": r.diff, "p": r.p})
     return pd.DataFrame(rows)
 
@@ -220,7 +222,7 @@ def summarise(task, models, l_pat, info, l_eye, l_one, lot, metric_main):
             "lottery_frac_significant": float((lt.p < 0.05).mean()) if len(lt) else None,
             "lottery_p_range": [float(lt.p.min()), float(lt.p.max())] if len(lt) else None})
     if len(lot):
-        best = pd.Series([_top(g, metric_main) for _, g in lot.groupby("draw")])
+        best = pd.Series([_top(g, metric_main) for _, g in lot[lot.metric == metric_main].groupby("draw")])
         out["lottery_top_model_counts"] = {k: int(v) for k, v in best.value_counts().items()}
     return out
 
@@ -284,7 +286,7 @@ def main():
         l_pat, info = compare(df, task, models, B)
         l_eye, _ = compare(df, task, models, B, unit="eye")
         l_one, _ = compare(df, task, models, B, one_eye=True)
-        lot = lottery(df, task, models, main_metric, draws, min(B, 999), SEED + 1)
+        lot = lottery(df, task, models, LOTTERY_METRICS[task], draws, min(B, 999), SEED + 1)
         lot.to_csv(os.path.join(res, f"papila_lottery_{name}.csv"), index=False)
         summary[name] = summarise(task, models, l_pat, info, l_eye, l_one, lot, main_metric)
         r = osx.analyze(df, task=task, models=models, patient="patient_id", truth="truth", subgroup="eye",
