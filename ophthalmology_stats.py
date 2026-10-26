@@ -1139,6 +1139,116 @@ def _detect_columns(df, task, models, patient, truth, extra_ignore=()):
     return task, list(models), patient, truth
 
 
+def model_performance(P, y, task, models, metrics, cluster_idx, K, b_idx, s, has_clusters, group_name="All"):
+    """Each model's own performance, every metric, with a percentile bootstrap CI that resamples patients (the same
+    resamples as the comparisons), so fellow eyes stay together. Eyes are weighted equally."""
+    n = P.shape[0]
+    ci_level = float(s["ci_level"])
+    a = (1 - ci_level) / 2
+    method = "patient bootstrap, percentile" if has_clusters else "bootstrap, percentile"
+    stats = {}                                   # metric -> (point estimates per model, list of bootstrap chunks)
+    if task == "continuous":
+        E = P if y is None else P - y[:, None]
+        absE = np.abs(E)
+        within = (absE <= s["within"]).astype(float)
+        order = np.argsort(absE, axis=0)
+    else:
+        clip = float(s["clip"])
+        Pc = np.clip(P, clip, 1 - clip)
+        brier = (P - y[:, None]) ** 2
+        logloss = -(y[:, None] * np.log(Pc) + (1 - y[:, None]) * np.log(1 - Pc))
+        correct = ((P >= s["threshold"]) == (y[:, None] == 1)).astype(float)
+        pos, neg = (y == 1).astype(float), (y == 0).astype(float)
+        auc_prep = []
+        for j in range(P.shape[1]):
+            o = np.argsort(P[:, j], kind="mergesort")
+            sv = P[o, j]
+            starts = np.r_[0, np.flatnonzero(np.diff(sv)) + 1]
+            auc_prep.append((o, starts))
+    point = {}
+    for metric in metrics:
+        if task == "continuous":
+            point[metric] = {"bias": E.mean(0), "mae": absE.mean(0), "rmse": np.sqrt((E ** 2).mean(0)),
+                             "medae": np.median(absE, 0), "sd": E.std(0, ddof=1) if n > 1 else np.full(E.shape[1], np.nan),
+                             "within": within.mean(0)}.get(metric)
+        else:
+            if metric == "auc":
+                pt = []
+                for j in range(P.shape[1]):
+                    xp, xn = P[y == 1, j], P[y == 0, j]
+                    pt.append(_placements(xp, xn)[0].mean() if len(xp) and len(xn) else np.nan)
+                point[metric] = np.array(pt)
+            else:
+                point[metric] = {"brier": brier.mean(0), "logloss": logloss.mean(0),
+                                 "sensitivity": correct[y == 1].mean(0) if pos.sum() else np.full(P.shape[1], np.nan),
+                                 "specificity": correct[y == 0].mean(0) if neg.sum() else np.full(P.shape[1], np.nan),
+                                 "accuracy": correct.mean(0)}.get(metric)
+        stats[metric] = []
+    B = b_idx.shape[0]
+    for c0 in range(0, B, 250):
+        cnt = np.zeros((min(250, B - c0), K))
+        for r, row in enumerate(b_idx[c0:c0 + 250]):
+            cnt[r] = np.bincount(row, minlength=K)
+        W = cnt[:, cluster_idx]                     # resample x eye weights (copies of each patient)
+        tot = W.sum(1, keepdims=True)
+        for metric in metrics:
+            if task == "continuous":
+                if metric == "bias":
+                    v = (W @ E) / tot
+                elif metric == "mae":
+                    v = (W @ absE) / tot
+                elif metric == "rmse":
+                    v = np.sqrt((W @ (E ** 2)) / tot)
+                elif metric == "within":
+                    v = (W @ within) / tot
+                elif metric == "sd":
+                    m1 = (W @ E) / tot
+                    v = np.sqrt(np.maximum((W @ (E ** 2)) - tot * m1 ** 2, 0) / np.maximum(tot - 1, 1))
+                elif metric == "medae":
+                    v = np.empty((W.shape[0], E.shape[1]))
+                    for j in range(E.shape[1]):
+                        cw = np.cumsum(W[:, order[:, j]], axis=1)
+                        k = np.argmax(cw >= cw[:, -1:] / 2, axis=1)
+                        v[:, j] = absE[order[:, j], j][k]
+                else:
+                    continue
+            else:
+                if metric == "brier":
+                    v = (W @ brier) / tot
+                elif metric == "logloss":
+                    v = (W @ logloss) / tot
+                elif metric in ("sensitivity", "specificity"):
+                    sub = pos if metric == "sensitivity" else neg
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        v = (W @ (correct * sub[:, None])) / (W @ sub)[:, None]
+                elif metric == "accuracy":
+                    v = (W @ correct) / tot
+                elif metric == "auc":
+                    v = np.empty((W.shape[0], P.shape[1]))
+                    for j, (o, starts) in enumerate(auc_prep):
+                        wp = np.add.reduceat(W[:, o] * pos[o], starts, axis=1)
+                        wn = np.add.reduceat(W[:, o] * neg[o], starts, axis=1)
+                        below = np.cumsum(wn, axis=1) - wn
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            v[:, j] = (wp * (below + 0.5 * wn)).sum(1) / (wp.sum(1) * wn.sum(1))
+                else:
+                    continue
+            stats[metric].append(v)
+    rows = []
+    for metric in metrics:
+        if not stats[metric] or point[metric] is None:
+            continue
+        bs = np.vstack(stats[metric])
+        for j, m in enumerate(models):
+            col = bs[:, j]
+            col = col[np.isfinite(col)]
+            lo, hi = (np.quantile(col, [a, 1 - a]) if len(col) else (np.nan, np.nan))
+            rows.append({"group": group_name, "model": m, "metric": metric, "estimate": float(point[metric][j]),
+                         "ci_low": float(lo), "ci_high": float(hi), "n_eyes": int(n), "n_patients": int(K),
+                         "method": method})
+    return rows
+
+
 def compare_models(df, task="continuous", models=None, patient=None, truth=None, settings=None, group_name="All"):
     """Compare every pair of models on the same eyes, with the patient as the unit of analysis.
 
@@ -1155,7 +1265,8 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
     Returns (wide, long, info): wide has one row per model pair with differences, CIs, p-values and adjusted
     p-values in the biometry_stats_advanced layout; long has one row per pair and metric, with the estimates for
     each model, the fellow-eye correlation of the loss difference (ρΔ, column rho_delta) and how many times more
-    patients one eye per patient would need (one_eye_factor); info describes the sample and the tests used.
+    patients one eye per patient would need (one_eye_factor); info describes the sample and the tests used, and
+    info["model_performance"] gives each model's own estimate of every metric with its patient-level 95% CI.
     """
     s = _settings(settings)
     task, models, patient, truth = _detect_columns(df, task, models, patient, truth)
@@ -1358,7 +1469,9 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
             "bilateral_fraction": float(np.mean(sizes >= 2)), "clustered": bool(has_clusters),
             "bootstrap_iterations": B, "seed": s["seed"], "weighting": s["weighting"], "unit": s["unit"],
             "one_eye": bool(s["one_eye"]), "fwer_method": s["fwer_method"],
-            "methodology": _methodology(long, task, has_clusters, s)}
+            "methodology": _methodology(long, task, has_clusters, s),
+            "model_performance": (model_performance(P, y, task, models, metrics, cluster_idx, K, b_idx, s,
+                                                    has_clusters, group_name) if s["report_ci"] else [])}
     return wide, long, info
 
 
@@ -1485,15 +1598,22 @@ def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=Non
     final.attrs["methodology_summary"] = [{"Test Category": k, "Methodology Applied": v}
                                           for k, v in first["methodology"].items()]
     final.attrs["long"] = long_all.to_dict("records")
-    final.attrs["group_info"] = {k: {kk: vv for kk, vv in v.items() if kk != "methodology"} for k, v in infos.items()}
+    final.attrs["model_performance"] = [r for v in infos.values() for r in v.get("model_performance", [])]
+    final.attrs["group_info"] = {k: {kk: vv for kk, vv in v.items() if kk not in ("methodology", "model_performance")}
+                                 for k, v in infos.items()}
     return final
 
 
 def write_results_to_excel(results, path):
-    """Write the results (sheet 'Results'), the tests used ('Statistical Tests'), and every estimate with its CI,
-    ρΔ (rho_delta) and one-eye factor ('Estimates')."""
+    """Write the comparisons (sheet 'Results'), the tests used ('Statistical Tests'), each model's performance with
+    its patient-level CI ('Model Performance'), every comparison with its CI, ρΔ (rho_delta) and one-eye factor
+    ('Estimates'), and the sample ('Sample')."""
     with pd.ExcelWriter(path) as writer:
         write_advanced_stats_to_excel(results, writer, sheet_name="Results")
+        if results.attrs.get("model_performance"):
+            mp = pd.DataFrame(results.attrs["model_performance"])
+            mp.to_excel(writer, sheet_name="Model Performance", index=False)
+            _set_column_widths(writer, "Model Performance", [18] * len(mp.columns))
         if "long" in results.attrs:
             est = pd.DataFrame(results.attrs["long"])
             est.to_excel(writer, sheet_name="Estimates", index=False)

@@ -25,8 +25,10 @@ used for the new metrics.
 | | AUC | Obuchowski (1997) clustered ROC analysis (DeLong when every patient has one eye) |
 | | Sensitivity, specificity, accuracy | Clustered McNemar test (Yang, Sun & Hardin 2010); McNemar with continuity correction when no patient has both eyes |
 
-Every difference between two models comes with a 95% confidence interval, a p-value and an adjusted p-value
-(Romano-Wolf step-down for the bootstrap tests, Hommel otherwise). For each metric the output also reports:
+Each model's own performance on every metric is given with a patient-level 95% confidence interval (percentile
+bootstrap resampling patients, so that fellow eyes stay together). Every difference between two models comes with
+a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down for the bootstrap tests,
+Hommel otherwise). For each metric the output also reports:
 
 * **ρΔ** (column `rho_delta`): the fellow-eye correlation of the per-eye difference in loss between the two
   models. This, not the correlation of the outcome itself, decides how far eye-level tests are misled and how much
@@ -62,7 +64,8 @@ import pandas as pd
 import ophthalmology_stats as osx
 
 res = osx.analyze(pd.read_csv("examples/example_classifier.csv"), task="binary", subgroup="eye")
-osx.write_results_to_excel(res, "results.xlsx")      # sheets: Results, Statistical Tests, Estimates, Sample
+osx.write_results_to_excel(res, "results.xlsx")
+# sheets: Results, Statistical Tests, Model Performance, Estimates, Sample
 ```
 
 `subgroup="eye"` adds results for right and left eyes separately, a simple check that a model trained on one

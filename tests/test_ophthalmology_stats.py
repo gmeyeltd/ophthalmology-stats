@@ -151,8 +151,24 @@ def test_subgroups_and_excel():
     path = os.path.join(tempfile.mkdtemp(), "r.xlsx")
     osx.write_results_to_excel(res, path)
     sheets = pd.ExcelFile(path).sheet_names
-    check("Excel output has Results, Statistical Tests, Estimates and Sample sheets",
-          {"Results", "Statistical Tests", "Estimates", "Sample"} <= set(sheets))
+    check("Excel output has Results, Statistical Tests, Model Performance, Estimates and Sample sheets",
+          {"Results", "Statistical Tests", "Model Performance", "Estimates", "Sample"} <= set(sheets))
+
+
+def test_model_performance():
+    df = binary_data()
+    s = {"bootstrap_iterations": 499, "verbose": False}
+    w, l, info = osx.compare_models(df, task="binary", settings=s)
+    mp = pd.DataFrame(info["model_performance"])
+    est = l.drop_duplicates(["model_a", "metric"]).set_index(["model_a", "metric"]).est_a
+    same = all(abs(mp.set_index(["model", "metric"]).estimate[k] - v) < 1e-12 for k, v in est.items())
+    check("each model's estimates match the comparison table", same)
+    check("each model's patient-level CI contains its estimate",
+          bool(((mp.ci_low <= mp.estimate) & (mp.estimate <= mp.ci_high)).all()))
+    eye = pd.DataFrame(osx.compare_models(df, task="binary", settings={**s, "unit": "eye"})[2]["model_performance"])
+    wp = (mp.ci_high - mp.ci_low)[mp.metric == "auc"].mean()
+    we = (eye.ci_high - eye.ci_low)[eye.metric == "auc"].mean()
+    check("patient-level CIs are wider than eye-level CIs when fellow eyes are alike", wp > we)
 
 
 def test_ties():
