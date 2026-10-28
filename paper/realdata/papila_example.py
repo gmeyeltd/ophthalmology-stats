@@ -219,6 +219,7 @@ def summarise(task, models, l_pat, info, l_eye, l_one, lot, metric_main):
             "one_eye_factor": r.one_eye_factor,
             "ci_eyes_independent": [e.loc[k, "ci_low"], e.loc[k, "ci_high"]] if k in e.index else None,
             "p_eyes_independent": float(e.loc[k, "p"]) if k in e.index else None,
+            "p_adj_eyes_independent": float(e.loc[k, "p_adj"]) if k in e.index else None,
             "p_one_eye": float(o.loc[k, "p"]) if k in o.index else None,
             "ci_one_eye": [o.loc[k, "ci_low"], o.loc[k, "ci_high"]] if k in o.index else None,
             "lottery_frac_significant": float((lt.p < 0.05).mean()) if len(lt) else None,

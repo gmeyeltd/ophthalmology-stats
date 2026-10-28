@@ -9,7 +9,7 @@ import shutil
 HERE = os.path.dirname(os.path.abspath(__file__))
 AI = os.path.join(HERE, "..", "..", "..")
 for sub, patterns in (("simulation", ["simulate.py", "dgm.py", "analyse_simulation.py", "make_figures.py"]),
-                      ("audit", ["audit_01_fetch.py", "audit_02_extract.py", "audit_03_validation.py",
+                      ("audit", ["audit_01_fetch.py", "audit_02_extract.py", "audit_03_validation.py", "survey_summary.py",
                                  "CODEBOOK.md", "development_set.csv"]),
                      ("realdata", ["papila_example.py", "papila_figure.py"])):
     os.makedirs(os.path.join(HERE, sub), exist_ok=True)
