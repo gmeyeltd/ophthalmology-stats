@@ -434,11 +434,6 @@ def figure_map(s):
     pos = [(((1 + f) ** 2 / (1 + E_ / 100) - (1 + f)) / (2 * f), f * 100)
            for E_, f in zip(lev_b, (0.50, 0.60, 0.72, 0.93))]
     axB.clabel(cs, fmt="+%d%%", fontsize=6.5, inline_spacing=2, manual=pos)
-    with plt.rc_context({"hatch.linewidth": 0.35, "hatch.color": "#8c8c8c"}):
-        axB.contourf(R, F * 100, EX_raw, levels=[-100, 0], colors="none", hatches=["//////"], zorder=2)
-    axB.contour(R, F * 100, EX_raw, levels=[0], colors=INK, linewidths=0.6, linestyles="dashed")
-    axB.text(0.97, 0.06, "Hatched: one eye slightly\nmore precise (at most 11%)", transform=axB.transAxes,
-             ha="right", va="bottom", fontsize=6.3, bbox=dict(fc="white", ec="none", pad=1))
     cb = fig.colorbar(im, ax=axB, fraction=0.05, pad=0.03); cb.set_label("Extra Patients Needed (%)")
     cb.outline.set_linewidth(0.4)
     axB.set_title("One eye per patient: extra patients needed\nfor the same precision as both eyes", loc="left")
