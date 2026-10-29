@@ -44,7 +44,11 @@ pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "truth": mea
 # continuous outputs, with an axial length per eye (fellow eyes alike) for a continuous subgroup; drawn after the
 # data above, so those files are unchanged
 axial_length = np.round(rng.normal(23.6, 1.3, size=pid.max() + 1)[pid] + rng.normal(0, 0.12, n), 2)
+# mean keratometry (D), lower in longer eyes, for a second subgroup and for crossing with axial length; drawn last,
+# so the columns above are unchanged
+mean_k = np.round(43.6 - 0.9 * (axial_length - 23.6) + rng.normal(0, 1.0, size=pid.max() + 1)[pid]
+                  + rng.normal(0, 0.15, n), 2)
 errors = {name: np.round(pred - measured, 2) for name, pred in cont.items()}
-pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "axial_length": axial_length, **errors}).to_csv(
-    "example_continuous_errors.csv", index=False)
+pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "axial_length": axial_length, "mean_k": mean_k,
+              **errors}).to_csv("example_continuous_errors.csv", index=False)
 print("written example_classifier.csv, example_continuous.csv and example_continuous_errors.csv")

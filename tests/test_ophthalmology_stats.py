@@ -416,6 +416,88 @@ def test_adjustment_method_columns():
           and "Subgroups" in tests.index and sample.definition.str.contains("eyes").all())
 
 
+def test_several_and_crossed_subgroups():
+    s = {"bootstrap_iterations": 199, "verbose": False}
+    df = with_axial_length()
+    rng = np.random.default_rng(11)
+    pid = df.patient_id.str[1:].astype(int).values
+    df["mean_k"] = np.round(43.6 - 0.9 * (df.axial_length_mm - 23.5) + rng.normal(0, 1, pid.max() + 1)[pid], 2)
+    models = osx.analyze(df[["patient_id", "F0", "F1", "F2", "F3", "mean_k"]], settings=s).attrs["group_info"]["All"]["models"]
+    check("a mean K column is not taken as a model", "mean_k" not in models)
+    forms = [osx.parse_subgroup_spec(x) for x in ("mean_k:bins=5", ("mean_k", {"bins": 5}), {"column": "mean_k", "bins": 5})]
+    check("subgroup definitions: string, pair and dict forms agree", all(f == forms[0] for f in forms)
+          and osx.parse_subgroup_spec("axial_length_mm:cuts=24.5,22") ==
+          {"column": "axial_length_mm", "cuts": [22.0, 24.5], "bins": None})
+    bad = 0
+    for x in ("mean_k:bins=1", "mean_k:bins=2.5", {"column": "mean_k", "bins": 3, "cuts": [43]}, {"bins": 3}):
+        try:
+            osx.parse_subgroup_spec(x)
+        except ValueError:
+            bad += 1
+    check("invalid subgroup definitions are rejected", bad == 4)
+    res = osx.analyze(df, subgroup=["axial_length_mm:cuts=22,24.5", "mean_k:bins=5", "site"], settings=s)
+    gi = res.attrs["group_info"]
+    by = pd.Series({g: v["grouping"] for g, v in gi.items()})
+    check("several subgroups: each analyzed separately, with its own split",
+          (by == "axial_length_mm").sum() == 3 and (by == "mean_k").sum() == 5 and (by == "site").sum() == 3)
+    one = osx.analyze(df, subgroup="axial_length_mm", settings={**s, "subgroup_cuts": [22, 24.5]})
+    a = res[res.Group.isin(one.Group)].reset_index(drop=True)
+    check("a subgroup's results do not depend on the other subgroups given", _same_frames(a, one.reset_index(drop=True)))
+    try:
+        osx.analyze(df, subgroup=["axial_length_mm", "mean_k"], settings={**s, "subgroup_cuts": [22]})
+        ok = False
+    except ValueError:
+        ok = True
+    check("settings subgroup_cuts with several subgroups is rejected", ok)
+    cr = osx.analyze(df, cross=["axial_length_mm:cuts=23,24.5", "mean_k:bins=3"], settings=s)
+    grid = cr.attrs["grid"]
+    cells = grid["cells"]
+    check("crossed subgroups: one cell per row and column", len(cells) == 9 and len(grid["rows"]) == 3
+          and len(grid["cols"]) == 3 and sum(c["n_eyes"] for c in cells.values()) == len(df))
+    small = [g for g, c in cells.items() if c["n_eyes"] >= 5 and c["n_patients"] < 20]
+    big = [g for g, c in cells.items() if c["n_patients"] >= 20]
+    est = pd.DataFrame(cr.attrs["long"])
+    check("small cells: estimates kept, intervals and tests removed",
+          len(small) == 0 or (est[est.group.isin(small)].p.isna().all() and est[est.group.isin(small)]["diff"].notna().all()))
+    g = big[0]
+    edges_r = [23.0, 24.5]
+    q = np.quantile(df.mean_k, [1 / 3, 2 / 3])
+    row_i = grid["rows"].index(cells[g]["row"])
+    col_i = grid["cols"].index(cells[g]["col"])
+    mask = ((np.searchsorted(edges_r, df.axial_length_mm, side="right") == row_i)
+            & (np.searchsorted(q, df.mean_k, side="right") == col_i))
+    w, _, _ = osx.compare_models(df[mask], task="continuous", models=models, settings=s, group_name=g)
+    check("a tested cell equals compare_models on its eyes (cut points from all eyes)",
+          _same_frames(cr[cr.Group == g].reset_index(drop=True), w.reset_index(drop=True)))
+    path = os.path.join(tempfile.mkdtemp(), "g.xlsx")
+    osx.write_results_to_excel(cr, path)
+    x = pd.ExcelFile(path)
+    tests = pd.read_excel(path, sheet_name="Statistical Tests").set_index("Test Category")["Methodology Applied"]
+    check("Excel: Grid sheet, grouping column, crossed-subgroup methods described",
+          "Grid" in x.sheet_names and "grouping" in pd.read_excel(path, sheet_name="Estimates").columns
+          and "Crossed subgroups" in tests.index and "exploratory" in tests["Subgroup adjustment"])
+    tmp = tempfile.mkdtemp()
+    df.to_csv(os.path.join(tmp, "k.csv"), index=False)
+    cli = osx._command_line([os.path.join(tmp, "k.csv"), "--subgroup", "axial_length_mm:cuts=22,24.5", "--subgroup",
+                             "mean_k:bins=4", "--cross", "axial_length_mm:cuts=23", "mean_k:bins=2",
+                             "--out", os.path.join(tmp, "k.xlsx")])
+    gb = pd.Series({k: v["grouping"] for k, v in cli.attrs["group_info"].items()})
+    check("command line: repeated --subgroup with inline cuts and bins, and --cross",
+          (gb == "axial_length_mm").sum() == 3 and (gb == "mean_k").sum() == 4
+          and (gb == "axial_length_mm × mean_k").sum() == 4)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import contextlib, io
+            with contextlib.redirect_stderr(io.StringIO()):
+                osx._command_line([os.path.join(tmp, "k.csv"), "--subgroup", "axial_length_mm", "--subgroup", "mean_k",
+                                   "--cuts", "22", "--out", os.path.join(tmp, "k2.xlsx")])
+        ok = False
+    except SystemExit:
+        ok = True
+    check("command line: --cuts with several subgroups is refused", ok)
+
+
 def test_ties():
     d = np.zeros(999)
     check("identical models give p = 1 (ties counted in both tails)", osx._calculate_percentile_bootstrap_p(d) == 1.0)

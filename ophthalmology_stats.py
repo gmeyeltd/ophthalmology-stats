@@ -12,7 +12,9 @@ With task='auto' (the default of analyze and the command line), a column with a 
 reference, diagnosis, measured, ...; see TRUTH_VARIANTS) is used as the reference when truth is not given; without
 one, the model columns are taken as prediction errors. Other columns (eye, age, ...) are ignored unless named as a
 subgroup, which can be nominal (e.g. eye), ordinal, or continuous (e.g. axial length, split at cut points or into
-equal-count quantile groups).
+equal-count quantile groups). Several subgroups can be given, each analyzed separately and each with its own cut
+points or number of groups; two of them can also be crossed (e.g. axial length x keratometry, off by default), with
+a 'Grid' sheet of each model's performance in each cell for heat maps.
 
 It extends biometry_stats_advanced (biometry-stats, for intraocular lens formulas), which is included unchanged
 in the first part of this file, so analyze_prediction_errors gives exactly the same results as before. The second
@@ -48,12 +50,14 @@ Quick start
     osx.write_results_to_excel(res, "results.xlsx")
 or from the command line:
     python ophthalmology_stats.py errors.csv --subgroup axial_length --cuts 22 24.5
+    python ophthalmology_stats.py errors.csv --subgroup axial_length:cuts=22,24.5,26 --subgroup mean_k:bins=5
+    python ophthalmology_stats.py errors.csv --cross axial_length:cuts=22,26 mean_k:bins=3      (3 x 3 cells, Grid sheet)
     python ophthalmology_stats.py predictions.csv --truth measured            (predictions plus the reference)
     python ophthalmology_stats.py probabilities.csv --task binary --truth diagnosis --subgroup eye
 
 https://github.com/gmeyeltd/ophthalmology-stats (MIT license)
 """
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import numpy as np
 import pandas as pd
@@ -1012,7 +1016,8 @@ MEAN_LOSS_METRICS = {"bias", "mae", "rmse", "brier", "logloss"}
 TRUTH_VARIANTS = ['truth', 'reference', 'reference_standard', 'ground_truth', 'groundtruth', 'label', 'y', 'y_true',
                   'target', 'diagnosis', 'outcome', 'actual', 'observed', 'measured', 'gold_standard']
 # Numeric columns never auto-detected as models (the subgroup column is excluded as well)
-GENERIC_IGNORE = ['axl', 'al', 'axial_length', 'acd', 'acdepth', 'k1', 'k2', 'meank', 'lt', 'lensthickness', 'cct',
+GENERIC_IGNORE = ['axl', 'al', 'axial_length', 'axiallength', 'acd', 'acdepth', 'k1', 'k2', 'meank', 'mean_k', 'k',
+                  'km', 'kmean', 'k_mean', 'avg_k', 'lt', 'lensthickness', 'cct',
                   'wtw', 'hcd', 'iol_implanted', 'postoperative_refraction', 'corneal_refractive_index', 'eye', 'side',
                   'laterality', 'od_os', 're_le', 'age', 'gender', 'gender_num', 'sex', 'visit',
                   'site', 'centre', 'center', 'device', 'image_id', 'imageid']
@@ -1043,6 +1048,7 @@ DEFAULT_SETTINGS = {
     "min_group_size": MIN_GROUP_SIZE,
     "subgroup_cuts": None,         # numeric subgroup column: cut points, e.g. [22, 24.5] -> <22, 22 to <24.5, >=24.5
     "subgroup_bins": None,         # numeric subgroup column: number of equal-count quantile groups, e.g. 3 (tertiles)
+    "cross_min_patients": 20,      # crossed subgroups: cells with fewer patients get point estimates only
     "verbose": True,
 }
 
@@ -2041,73 +2047,327 @@ def define_subgroups(df, column, cuts=None, bins=None, max_levels=SUBGROUP_MAX_L
                     "n_missing": n_missing}
 
 
-def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=None, settings=None):
-    """compare_models for all eyes and, if subgroup names a column, for each of its subgroups. Returns the wide table
-    (one row per group and model pair) with the long table, each model's performance, the methodology and the
-    sample (group_info) in .attrs, ready for write_results_to_excel.
+import re  # noqa: E402
+
+_SPEC_RE = re.compile(r"^(?P<col>.+?):(?P<key>bins|cuts)=(?P<val>[^:]+)$")
+
+
+def parse_subgroup_spec(spec):
+    """One subgroup definition as {'column', 'cuts', 'bins'}. Accepted forms:
+      'eye'                           a column, split as define_subgroups does by default
+      'axial_length:cuts=22,24.5,26'  cut points (each interval includes its lower cut point)
+      'mean_k:bins=5'                 equal-count quantile groups (here quintiles)
+      ('mean_k', {'bins': 5})  or  {'column': 'mean_k', 'bins': 5}
+    """
+    if isinstance(spec, dict):
+        opts = dict(spec)
+        col = opts.pop("column", None)
+    elif isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], dict):
+        col, opts = spec[0], dict(spec[1])
+    elif isinstance(spec, str):
+        m = _SPEC_RE.match(spec.strip())
+        if m:
+            col, key, val = m["col"], m["key"], m["val"]
+            try:
+                opts = {key: [float(v) for v in val.split(",") if v.strip()] if key == "cuts" else int(val)}
+            except ValueError:
+                raise ValueError(f"cannot read {key!r} in subgroup {spec!r}: use e.g. 'axial_length:cuts=22,24.5' "
+                                 "or 'mean_k:bins=5'") from None
+        else:
+            col, opts = spec, {}
+    else:
+        raise TypeError(f"a subgroup is a column name, 'column:bins=Q', 'column:cuts=a,b', (column, {{...}}) or "
+                        f"{{'column': ...}}; got {spec!r}")
+    if col is None or col == "":
+        raise ValueError(f"subgroup {spec!r} names no column")
+    unknown = set(opts) - {"cuts", "bins"}
+    if unknown:
+        raise ValueError(f"subgroup {col!r}: unknown option(s) {sorted(unknown)}; use 'cuts' or 'bins'")
+    cuts, bins = opts.get("cuts"), opts.get("bins")
+    if cuts is not None and bins is not None:
+        raise ValueError(f"subgroup {col!r}: give cuts or bins, not both")
+    if cuts is not None:
+        cuts = sorted({float(c) for c in np.atleast_1d(cuts)})
+        if not cuts or not np.all(np.isfinite(cuts)):
+            raise ValueError(f"subgroup {col!r}: cuts must be one or more finite numbers")
+    if bins is not None:
+        if int(bins) != bins or int(bins) < 2:
+            raise ValueError(f"subgroup {col!r}: bins must be an integer of at least 2")
+        bins = int(bins)
+    return {"column": col, "cuts": cuts, "bins": bins}
+
+
+def _is_single_spec(x):
+    return isinstance(x, (str, dict)) or (isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], dict))
+
+
+def _subgroup_specs(subgroup, s):
+    """The list of subgroup definitions; settings subgroup_cuts/subgroup_bins apply to a single column name."""
+    if subgroup is None:
+        return []
+    specs = [parse_subgroup_spec(x) for x in ([subgroup] if _is_single_spec(subgroup) else list(subgroup))]
+    if s["subgroup_cuts"] is not None or s["subgroup_bins"] is not None:
+        if len(specs) != 1 or specs[0]["cuts"] is not None or specs[0]["bins"] is not None:
+            raise ValueError("settings subgroup_cuts and subgroup_bins apply to one subgroup given by its column name; "
+                             "with several subgroups give the cut points or bins in each, e.g. "
+                             "'axial_length:cuts=22,24.5' or 'mean_k:bins=5'")
+        specs[0]["cuts"], specs[0]["bins"] = s["subgroup_cuts"], s["subgroup_bins"]
+    return specs
+
+
+def _blank_tests(w, l, info, why):
+    """Keep the estimates of a group but remove its intervals and tests (too few patients)."""
+    w = w.copy()
+    cols = [c for c in w.columns if c.endswith(" p") or c.endswith(" p_adj") or "95% CI" in c]
+    w[cols] = np.nan
+    l = l.copy()
+    for c in ("ci_low", "ci_high", "p", "p_adj", "ci_adj_low", "ci_adj_high"):
+        if c in l.columns:
+            l[c] = np.nan
+    l["test"] = why
+    for c in ("p_adj_method", "ci_adj_method"):
+        if c in l.columns:
+            l[c] = ""
+    info = dict(info)
+    info["model_performance"] = [{**r, "ci_low": np.nan, "ci_high": np.nan, "method": "point estimate only (" + why + ")"}
+                                 for r in info.get("model_performance", [])]
+    return w, l, info
+
+
+def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=None, cross=None, settings=None):
+    """compare_models for all eyes and for each subgroup. Returns the wide table (one row per group and model pair)
+    with the long table, each model's performance, the methodology and the sample (group_info) in .attrs, ready for
+    write_results_to_excel.
 
     df        one row per eye: a patient ID column and, for continuous outputs, one column of prediction errors
               (prediction minus reference) per model; or predictions with truth naming the reference column. For
               classifiers, one column of predicted probabilities per model and truth, the 0/1 diagnosis (required:
               AUC, sensitivity and specificity are defined by it). See compare_models for task='auto'.
-    subgroup  a column of any type: nominal (e.g. 'eye' for right and left eyes), ordinal, or continuous (e.g.
-              axial length), split by settings subgroup_cuts (cut points) or subgroup_bins (equal-count quantile
-              groups); tertiles by default for a numeric column with more than 10 distinct values (see
-              define_subgroups). The subgroup column is never taken as a model.
+    subgroup  one subgroup definition or a list of them, each analyzed separately (not crossed). A definition is a
+              column of any type: nominal (e.g. 'eye' for right and left eyes), ordinal, or continuous (e.g. axial
+              length), with its own cut points or number of equal-count groups: 'axial_length:cuts=22,24.5,26',
+              'mean_k:bins=5', ('mean_k', {'bins': 5}) or {'column': 'mean_k', 'bins': 5} (see
+              parse_subgroup_spec). A numeric column with more than 10 distinct values and neither is split into
+              tertiles. For a single column name, settings subgroup_cuts or subgroup_bins can be used instead.
+    cross     optional pair of definitions [rows, columns] crossed with each other, e.g.
+              ['axial_length:cuts=22,26', 'mean_k:bins=3'] for 3 x 3 cells. Off by default. Cut points come from all
+              eyes, so a row or column covers the same range in every cell. Cells with fewer than
+              settings['cross_min_patients'] patients (default 20) get point estimates only, without intervals or
+              tests. write_results_to_excel adds a 'Grid' sheet: each model's performance in each cell, colored
+              from best to worst, for heat maps.
 
     The task and the model, patient and reference columns are found once, on all eyes, and used for every group.
-    Each group is analyzed separately: p-values and intervals are adjusted for the model pairs within the group,
-    not across groups. group_info records each group's definition, e.g. 'axial_length 22 to <24.5: 412 eyes, 230
+    Subgroup and crossed columns are never taken as models. Each group is analyzed separately: p-values and
+    intervals are adjusted for the model pairs within the group, not across groups, so subgroup results are
+    exploratory. group_info records each group's definition, e.g. 'axial_length 22 to <24.5: 412 eyes, 230
     patients'."""
     s = _settings(settings)
-    if subgroup is not None and models is not None and subgroup in list(models):
-        raise ValueError(f"the subgroup column {subgroup!r} cannot also be a model")
-    task, models, patient, truth = _detect_columns(df, task, models, patient, truth,
-                                                   extra_ignore=() if subgroup is None else (subgroup,))
-    groups, sub_desc = [("All", np.ones(len(df), bool), "All eyes")], None
-    if subgroup is not None:
-        sub_groups, sub_desc = define_subgroups(df, subgroup, s["subgroup_cuts"], s["subgroup_bins"])
-        groups += sub_groups
-        if s["verbose"] and sub_desc["default_bins"]:
-            print(f"[subgroups] {subgroup} has more than {SUBGROUP_MAX_LEVELS} distinct values: split into tertiles "
-                  "(equal numbers of eyes) by default; set subgroup_cuts or subgroup_bins (--cuts, --bins) to choose.")
-    wides, longs, infos, sample = [], [], {}, {}
-    for name, mask, definition in groups:
+    specs = _subgroup_specs(subgroup, s)
+    cross_specs = None
+    if cross is not None:
+        cross_specs = [parse_subgroup_spec(x) for x in ([cross] if _is_single_spec(cross) else list(cross))]
+        if len(cross_specs) != 2:
+            raise ValueError("cross takes two subgroup definitions: [rows, columns]")
+        if cross_specs[0]["column"] == cross_specs[1]["column"]:
+            raise ValueError("cross needs two different columns")
+    sub_cols = list(dict.fromkeys([d["column"] for d in specs] + [d["column"] for d in (cross_specs or [])]))
+    for c in sub_cols:
+        if models is not None and c in list(models):
+            raise ValueError(f"the subgroup column {c!r} cannot also be a model")
+    task, models, patient, truth = _detect_columns(df, task, models, patient, truth, extra_ignore=tuple(sub_cols))
+    groups, descs, seen = [("All", np.ones(len(df), bool), "All eyes", {"grouping": "All"})], [], {"All"}
+
+    def add(name, mask, definition, meta):
+        if name not in seen:
+            seen.add(name)
+            groups.append((name, mask, definition, meta))
+
+    for spec in specs:
+        g, d = define_subgroups(df, spec["column"], spec["cuts"], spec["bins"])
+        descs.append(d)
+        if s["verbose"] and d["default_bins"]:
+            print(f"[subgroups] {spec['column']} has more than {SUBGROUP_MAX_LEVELS} distinct values: split into "
+                  "tertiles (equal numbers of eyes) by default; give cut points or bins to choose (e.g. "
+                  f"'{spec['column']}:bins=5').")
+        for name, mask, definition in g:
+            add(name, mask, definition, {"grouping": spec["column"]})
+    grid, cross_desc = None, None
+    if cross_specs:
+        (ga, da), (gb, db) = [define_subgroups(df, c["column"], c["cuts"], c["bins"]) for c in cross_specs]
+        label = f"{da['column']} × {db['column']}"
+        cross_desc = (da, db)
+        grid = {"label": label, "row_column": da["column"], "col_column": db["column"],
+                "rows": [n for n, _, _ in ga], "cols": [n for n, _, _ in gb], "cells": {},
+                "min_patients": int(s["cross_min_patients"])}
+        for na, ma, _ in ga:
+            for nb, mb, _ in gb:
+                name = f"{na} × {nb}"
+                add(name, ma & mb, name, {"grouping": label, "row": na, "col": nb, "crossed": True})
+    wides, longs, infos, sample, gmap = [], [], {}, {}, {}
+    for name, mask, definition, meta in groups:
+        gmap[name] = meta["grouping"]
         sub = df[mask]
+        n_pat = int(sub[patient].nunique()) if patient is not None else len(sub)
+        if meta.get("crossed"):
+            grid["cells"][name] = {"row": meta["row"], "col": meta["col"], "n_eyes": int(len(sub)),
+                                   "n_patients": n_pat, "tested": False}
+        if len(sub) == 0:
+            sample[name] = {"grouping": meta["grouping"], "definition": f"{definition}: no eyes"}
+            continue
         w, l, info = compare_models(sub, task=task, models=models, patient=patient, truth=truth, settings=s,
                                     group_name=name)
         if w.empty:
-            sample[name] = {"definition": f"{definition}: {len(sub)} eye(s), not tested (fewer than "
+            sample[name] = {"grouping": meta["grouping"],
+                            "definition": f"{definition}: {len(sub)} eye(s), not tested (fewer than "
                                           f"{max(2, int(s['min_group_size']))} valid eyes)"}
             continue
+        note = ""
+        if meta.get("crossed"):
+            if n_pat < int(s["cross_min_patients"]):
+                why = f"fewer than {int(s['cross_min_patients'])} patients"
+                w, l, info = _blank_tests(w, l, info, why)
+                note = f"; point estimates only ({why})"
+            else:
+                grid["cells"][name]["tested"] = True
         units = (f"{info['n_patients']} patients" if info["patient_column"] is not None
                  else "eyes analyzed as independent units")
         wides.append(w); longs.append(l)
         infos[name] = info
-        sample[name] = {"definition": f"{definition}: {info['n_eyes']} eyes, {units}",
+        sample[name] = {"grouping": meta["grouping"], "definition": f"{definition}: {info['n_eyes']} eyes, {units}{note}",
                         **{k: v for k, v in info.items() if k not in ("methodology", "model_performance")}}
     if not wides:
         return pd.DataFrame()
     final = pd.concat(wides, ignore_index=True)
     long_all = pd.concat(longs, ignore_index=True)
+    long_all.insert(1, "grouping", long_all["group"].map(gmap))
     first = next(iter(infos.values()))
     methodology = dict(first["methodology"])
-    if sub_desc is not None:
-        methodology["Subgroups"] = (sub_desc["summary"] + ". Each subgroup is analyzed separately with the same models, "
-                                    "tests and settings; p-values and intervals are adjusted for the model pairs "
-                                    "within each group, not across groups")
+    if descs:
+        methodology["Subgroups"] = ("; ".join(d["summary"] for d in descs) + ". Each subgroup is analyzed separately "
+                                    "with the same models, tests and settings")
+    if cross_desc:
+        da, db = cross_desc
+        methodology["Crossed subgroups"] = (f"{da['summary']}, crossed with {db['summary']}. Cut points come from all "
+                                            "eyes, so a row or column covers the same range in every cell. Cells with "
+                                            f"fewer than {int(s['cross_min_patients'])} patients get point estimates "
+                                            "only, without intervals or tests")
+    if descs or cross_desc:
+        methodology["Subgroup adjustment"] = ("Subgroup results are exploratory: p-values and intervals are adjusted "
+                                              "for the model pairs within each group, not across groups")
     final.attrs["methodology_summary"] = [{"Test Category": k, "Methodology Applied": v} for k, v in methodology.items()]
     final.attrs["long"] = long_all.to_dict("records")
-    final.attrs["model_performance"] = [r for v in infos.values() for r in v.get("model_performance", [])]
+    mp = [{**r, "grouping": gmap.get(r.get("group"), "")} for v in infos.values() for r in v.get("model_performance", [])]
+    final.attrs["model_performance"] = [{k: r[k] for k in ["group", "grouping"] + [c for c in r if c not in ("group", "grouping")]}
+                                        for r in mp]
     final.attrs["group_info"] = sample
+    if grid is not None:
+        grid["task"] = task
+        final.attrs["grid"] = grid
     return final
+
+
+METRIC_LABELS = {"bias": "Mean error", "mae": "Mean absolute error", "rmse": "Root mean squared error",
+                 "medae": "Median absolute error", "sd": "SD of the error", "within": "Proportion within tolerance",
+                 "auc": "AUC", "brier": "Brier score", "logloss": "Log-loss", "sensitivity": "Sensitivity",
+                 "specificity": "Specificity", "accuracy": "Accuracy"}
+LOWER_IS_BETTER = {"mae", "rmse", "medae", "sd", "brier", "logloss"}
+HIGHER_IS_BETTER = {"within", "auc", "sensitivity", "specificity", "accuracy"}
+
+
+def _write_grid_sheet(path, results):
+    """'Grid' sheet for crossed subgroups: for each metric, one block per model (rows and columns are the two
+    subgroups), with a color scale shared by the models of that metric (white best, red worst; for the mean error,
+    red the further from 0), so the cells where a model does poorly stand out."""
+    grid = results.attrs.get("grid")
+    mp = pd.DataFrame(results.attrs.get("model_performance", []))
+    if not grid or mp.empty:
+        return
+    from openpyxl import load_workbook
+    from openpyxl.formatting.rule import ColorScaleRule
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.utils import get_column_letter
+    cells = grid["cells"]
+    mp = mp[mp["group"].isin(list(cells))]
+    if mp.empty:
+        return
+    est = {(r.group, r.model, r.metric): r.estimate for r in mp.itertuples()}
+    models = list(dict.fromkeys(mp["model"]))
+    metrics = list(dict.fromkeys(mp["metric"]))
+    rows, cols = grid["rows"], grid["cols"]
+    by_rc = {(c["row"], c["col"]): name for name, c in cells.items()}
+    wb = load_workbook(path)
+    ws = wb.create_sheet("Grid")
+    bold, grey = Font(bold=True), Font(italic=True, color="808080")
+    ws.cell(1, 1, f"{grid['label']}: each model's performance in each cell (rows: {grid['row_column']}; columns: "
+                  f"{grid['col_column']}). Cut points come from all eyes. Gray italics: fewer than "
+                  f"{grid['min_patients']} patients (point estimate only, not colored). Empty: no eyes. Within each metric the "
+                  "color scale is shared by all models: white is best and red worst (for the mean error, red is "
+                  "furthest from 0).").font = Font(italic=True)
+    width = len(cols) + 2                                          # row labels, columns, one blank column
+
+    def block(r0, c0, title, value_of, fmt):
+        ws.cell(r0, c0, title).font = bold
+        for j, cl in enumerate(cols):
+            h = ws.cell(r0 + 1, c0 + 1 + j, cl)
+            h.font = bold
+            h.alignment = Alignment(wrap_text=True)
+        refs = []
+        for i, rw in enumerate(rows):
+            ws.cell(r0 + 2 + i, c0, rw).font = bold
+            for j, cl in enumerate(cols):
+                name = by_rc.get((rw, cl))
+                v = value_of(name) if name is not None else None
+                if v is None or (isinstance(v, float) and not np.isfinite(v)):
+                    continue
+                cell = ws.cell(r0 + 2 + i, c0 + 1 + j, v)
+                if fmt:
+                    cell.number_format = fmt
+                if name is not None and not cells[name]["tested"]:
+                    cell.font = grey                                   # shown, but kept out of the color scale
+                else:
+                    refs.append(cell.coordinate)
+        return refs
+
+    r = 3
+    block(r, 1, "Patients (eyes) per cell", lambda n: (f"{cells[n]['n_patients']} ({cells[n]['n_eyes']})"
+                                                         if cells[n]["n_eyes"] else None), None)
+    r += len(rows) + 3
+    for metric in metrics:
+        sense = ("lower is better" if metric in LOWER_IS_BETTER else "higher is better" if metric in HIGHER_IS_BETTER
+                 else "closer to 0 is better")
+        ws.cell(r, 1, f"{METRIC_LABELS.get(metric, metric)} ({sense})").font = Font(bold=True, size=12)
+        refs = []
+        for k, model in enumerate(models):
+            refs += block(r + 1, 1 + k * width, str(model), lambda n, m=model: est.get((n, m, metric)), "0.000")
+        vals = [v for (g, m, mt), v in est.items() if mt == metric and np.isfinite(v) and cells[g]["tested"]]
+        if refs and vals:
+            rng_ = " ".join(refs)
+            if metric in LOWER_IS_BETTER:
+                rule = ColorScaleRule(start_type="min", start_color="FFFFFF", end_type="max", end_color="D6604D")
+            elif metric in HIGHER_IS_BETTER:
+                rule = ColorScaleRule(start_type="min", start_color="D6604D", end_type="max", end_color="FFFFFF")
+            else:
+                big = max(abs(v) for v in vals) or 1.0
+                rule = ColorScaleRule(start_type="num", start_value=-big, start_color="D6604D", mid_type="num",
+                                      mid_value=0, mid_color="FFFFFF", end_type="num", end_value=big,
+                                      end_color="D6604D")
+            ws.conditional_formatting.add(rng_, rule)
+        r += len(rows) + 4
+    ws.column_dimensions["A"].width = 30
+    for k in range(len(models)):
+        c0 = 1 + k * width
+        ws.column_dimensions[get_column_letter(c0)].width = 30
+        for j in range(len(cols)):
+            ws.column_dimensions[get_column_letter(c0 + 1 + j)].width = 16
+    wb.save(path)
 
 
 def write_results_to_excel(results, path):
     """Write the comparisons (sheet 'Results'), the tests and adjustments used ('Statistical Tests'), each model's
     performance with its patient-level CI ('Model Performance'), every comparison with its CI, adjusted CI, ρΔ
     (rho_delta), one-eye factor and the adjustment applied (p_adj_method, ci_adj_method; 'Estimates'), and the
-    sample with each group's definition ('Sample')."""
+    sample with each group's definition ('Sample'). With crossed subgroups, a 'Grid' sheet gives each model's
+    performance in each cell, colored from best to worst, for heat maps."""
     with pd.ExcelWriter(path) as writer:
         write_advanced_stats_to_excel(results, writer, sheet_name="Results")
         if results.attrs.get("model_performance"):
@@ -2122,7 +2382,9 @@ def write_results_to_excel(results, path):
         if "group_info" in results.attrs:
             gi = pd.DataFrame(results.attrs["group_info"]).T.reset_index().rename(columns={"index": "Group"})
             gi.to_excel(writer, sheet_name="Sample", index=False)
-            _set_column_widths(writer, "Sample", [30, 60] + [16] * (len(gi.columns) - 2))
+            _set_column_widths(writer, "Sample", [30, 24, 60] + [16] * (len(gi.columns) - 3))
+    if results.attrs.get("grid"):
+        _write_grid_sheet(path, results)
 
 
 def _command_line(argv=None):
@@ -2148,27 +2410,37 @@ def _command_line(argv=None):
                          "and the errors prediction - truth), required for classifiers (the 0/1 diagnosis). With "
                          "--task auto or binary a column named truth, reference, diagnosis, measured, ... is used "
                          "if present")
-    ap.add_argument("--subgroup", default=None, metavar="COLUMN",
-                    help="also give results for each subgroup of this column: nominal (e.g. eye), ordinal, or "
-                         "continuous (e.g. axial_length; see --cuts and --bins)")
+    ap.add_argument("--subgroup", action="append", default=None, metavar="SPEC",
+                    help="also give results for each subgroup of a column; repeat for several columns, each analyzed "
+                         "separately. SPEC is a column (nominal, e.g. eye; ordinal; or continuous, split into "
+                         "tertiles by default) or COLUMN:cuts=A,B,... (cut points) or COLUMN:bins=Q (Q equal-count "
+                         "groups), e.g. --subgroup axial_length:cuts=22,24.5,26 --subgroup mean_k:bins=5")
     split = ap.add_mutually_exclusive_group()
     split.add_argument("--cuts", nargs="+", type=float, default=None, metavar="CUT",
-                       help="continuous subgroup: cut points, e.g. --cuts 22 24.5 gives <22, 22 to <24.5 and >=24.5")
+                       help="with a single --subgroup COLUMN: cut points, e.g. --cuts 22 24.5 gives <22, 22 to <24.5 "
+                            "and >=24.5")
     split.add_argument("--bins", type=int, default=None, metavar="Q",
-                       help="continuous subgroup: Q equal-count quantile groups (e.g. 3 for tertiles). A numeric "
-                            "column with more than 10 distinct values is split into tertiles if neither is given")
+                       help="with a single --subgroup COLUMN: Q equal-count quantile groups (e.g. 3 for tertiles)")
+    ap.add_argument("--cross", nargs=2, default=None, metavar=("ROWS", "COLUMNS"),
+                    help="optional: cross two subgroup SPECs, e.g. --cross axial_length:cuts=22,26 mean_k:bins=3 "
+                         "(3 x 3 cells), with a Grid sheet for heat maps. Cut points come from all eyes")
+    ap.add_argument("--cross-min-patients", type=int, default=20, metavar="N",
+                    help="crossed cells with fewer patients get point estimates only (default 20)")
     ap.add_argument("--weighting", default="eye", choices=["eye", "patient", "optimal"])
     ap.add_argument("--threshold", type=float, default=0.5, help="classifiers: probability threshold (default 0.5)")
     ap.add_argument("--within", type=float, default=MCNEMAR_THRESHOLD,
                     help="continuous outputs: tolerance for the proportion of eyes with |error| <= within")
     ap.add_argument("--out", default="ophthalmology_stats_results.xlsx")
     a = ap.parse_args(argv)
-    if (a.cuts is not None or a.bins is not None) and a.subgroup is None:
-        ap.error("--cuts and --bins need --subgroup")
+    if (a.cuts is not None or a.bins is not None) and (a.subgroup is None or len(a.subgroup) != 1):
+        ap.error("--cuts and --bins go with a single --subgroup COLUMN; for several subgroups write the cut points or "
+                 "bins in each, e.g. --subgroup axial_length:cuts=22,24.5 --subgroup mean_k:bins=5")
+    sub = None if a.subgroup is None else (a.subgroup[0] if len(a.subgroup) == 1 else a.subgroup)
     res = analyze(pd.read_csv(a.csv), task=a.task, models=a.models, patient=a.patient, truth=a.truth,
-                  subgroup=a.subgroup, settings={"weighting": a.weighting, "threshold": a.threshold,
-                                                 "within": a.within, "subgroup_cuts": a.cuts,
-                                                 "subgroup_bins": a.bins})
+                  subgroup=sub, cross=a.cross, settings={"weighting": a.weighting, "threshold": a.threshold,
+                                                         "within": a.within, "subgroup_cuts": a.cuts,
+                                                         "subgroup_bins": a.bins,
+                                                         "cross_min_patients": a.cross_min_patients})
     write_results_to_excel(res, a.out)
     print(f"Results written to {a.out}")
     return res

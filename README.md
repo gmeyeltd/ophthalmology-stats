@@ -55,6 +55,8 @@ python ophthalmology_stats.py examples/example_continuous_errors.csv --subgroup 
 python ophthalmology_stats.py examples/example_continuous.csv --truth truth --subgroup eye --out results.xlsx
 # classifier
 python ophthalmology_stats.py examples/example_classifier.csv --task binary --truth truth --subgroup eye --out results.xlsx
+# several subgroups, each with its own split, and axial length crossed with keratometry (Grid sheet for heat maps)
+python ophthalmology_stats.py examples/example_continuous_errors.csv --subgroup axial_length:cuts=22,24.5,26 --subgroup mean_k:bins=5 --cross axial_length:cuts=22.5,24.5 mean_k:bins=3 --out results.xlsx
 ```
 
 ```python
@@ -64,14 +66,14 @@ import ophthalmology_stats as osx
 res = osx.analyze(pd.read_csv("examples/example_continuous_errors.csv"), subgroup="axial_length",
                   settings={"subgroup_cuts": [22, 24.5]})
 osx.write_results_to_excel(res, "results.xlsx")
-# sheets: Results, Statistical Tests, Model Performance, Estimates, Sample
+# sheets: Results, Statistical Tests, Model Performance, Estimates, Sample (and Grid with crossed subgroups)
 ```
 
-`examples/run_examples.py` makes the three example result files in `examples/` (with 4,999 resamples).
+`examples/run_examples.py` makes the four example result files in `examples/` (with 4,999 resamples).
 
 ## Subgroups
 
-`subgroup=` (CLI `--subgroup COLUMN`) adds results for each subgroup of a column of any type:
+`subgroup=` (CLI `--subgroup`) adds results for each subgroup of a column of any type:
 
 * **nominal** (text, e.g. `eye`, `site`, `device`): one subgroup per level, e.g. `eye = L` and `eye = R`, a simple
   check that a model trained on one laterality (for example after flipping left-eye images) performs similarly on
@@ -86,8 +88,45 @@ osx.write_results_to_excel(res, "results.xlsx")
 The subgroup column is never taken as a model: the models are found once, on all eyes, and used for every group.
 The Sample sheet gives each group's definition, e.g. `axial_length 22 to <24.5: 238 eyes, 154 patients`. Each
 subgroup is analyzed separately, so p-values and intervals are adjusted for the model pairs within the group, not
-across groups. A patient's two eyes can fall in different subgroups of a continuous column; within each subgroup the
-patient is still the unit. Eyes with no value are in All only.
+across groups, and subgroup results are exploratory. A patient's two eyes can fall in different subgroups of a
+continuous column; within each subgroup the patient is still the unit. Eyes with no value are in All only.
+
+### Several subgroups
+
+Give a list (CLI: repeat `--subgroup`). Each column is analyzed separately (not crossed) and can have its own split,
+written into the definition:
+
+```python
+res = osx.analyze(df, subgroup=["axial_length:cuts=22,24.5,26", "mean_k:bins=5", "eye"])
+# equivalently: ("mean_k", {"bins": 5}) or {"column": "mean_k", "bins": 5}
+```
+
+```bash
+python ophthalmology_stats.py errors.csv --subgroup axial_length:cuts=22,24.5,26 --subgroup mean_k:bins=5 --subgroup eye
+```
+
+This gives All, four axial length groups, five keratometry quintiles (each using all eyes, whatever their axial
+length) and right and left eyes. A `grouping` column in the Estimates, Model Performance and Sample sheets says which
+subgroup each row belongs to. `--cuts` and `--bins` (and `subgroup_cuts`, `subgroup_bins`) still work with a single
+`--subgroup COLUMN`.
+
+### Crossed subgroups (off by default)
+
+`cross=[rows, columns]` (CLI `--cross ROWS COLUMNS`) also crosses two subgroups, for example axial length with
+keratometry, to show where a model does poorly:
+
+```bash
+python ophthalmology_stats.py errors.csv --cross axial_length:cuts=22.5,24.5 mean_k:bins=3
+```
+
+* Cut points come from all eyes, so a row or column covers the same range in every cell (for example, keratometry
+  tertile 1 means the same range of K in short and long eyes).
+* Cells with fewer than 20 patients (`cross_min_patients`, CLI `--cross-min-patients`) get point estimates only,
+  without intervals or tests; cells with fewer than 5 eyes are not analyzed. Keep crossings coarse (3 x 3 rather than
+  5 x 5): axial length and keratometry are correlated, so the corner cells are nearly empty.
+* The **Grid** sheet gives each model's performance in each cell: one block per model and metric, with a color scale
+  shared by the models of each metric (white best, red worst; for the mean error, red is furthest from 0), ready to
+  read as a heat map. Small cells are shown in gray italics and left out of the color scale.
 
 ## Metrics and tests
 

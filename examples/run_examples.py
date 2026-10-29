@@ -13,6 +13,13 @@ res = osx.analyze(pd.read_csv("example_continuous_errors.csv"), subgroup="axial_
                   settings={"within": 0.5, "subgroup_cuts": [22, 24.5]})
 osx.write_results_to_excel(res, "example_continuous_errors_results.xlsx")
 
+# the same data with several subgroups, each with its own split (axial length at cut points, keratometry in
+# quintiles, right and left eyes), and axial length crossed with keratometry (3 x 3 cells; Grid sheet for heat maps)
+res = osx.analyze(pd.read_csv("example_continuous_errors.csv"),
+                  subgroup=["axial_length:cuts=22,24.5,26", "mean_k:bins=5", "eye"],
+                  cross=["axial_length:cuts=22.5,24.5", "mean_k:bins=3"], settings={"within": 0.5})
+osx.write_results_to_excel(res, "example_continuous_errors_subgroups_results.xlsx")
+
 # continuous output given as predictions and the measured value (errors are prediction - truth);
 # results for all eyes and for right and left eyes
 res = osx.analyze(pd.read_csv("example_continuous.csv"), task="continuous", truth="truth", subgroup="eye",
@@ -22,5 +29,5 @@ osx.write_results_to_excel(res, "example_continuous_results.xlsx")
 # classifier: probabilities and the 0/1 diagnosis; results for all eyes and for right and left eyes
 res = osx.analyze(pd.read_csv("example_classifier.csv"), task="binary", subgroup="eye")
 osx.write_results_to_excel(res, "example_classifier_results.xlsx")
-print("written example_continuous_errors_results.xlsx, example_continuous_results.xlsx and "
-      "example_classifier_results.xlsx")
+print("written example_continuous_errors_results.xlsx, example_continuous_errors_subgroups_results.xlsx, "
+      "example_continuous_results.xlsx and example_classifier_results.xlsx")
