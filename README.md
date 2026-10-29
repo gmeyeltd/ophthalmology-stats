@@ -13,6 +13,82 @@ It extends [biometry-stats](https://github.com/gmeyeltd/biometry-stats) (intraoc
 and the same resamples, tests, p-value rules, confidence intervals, Romano-Wolf adjustment and Excel output are
 used for the new metrics.
 
+## Input
+
+A CSV or pandas DataFrame with **one row per eye**.
+
+**Continuous outputs** (a refraction, axial length, thickness, ...): a patient ID column and **one column of
+prediction errors per model** (prediction minus reference). This is the primary input:
+
+| patient_id | eye | axial_length | model_A | model_B | model_C |
+|---|---|---|---|---|---|
+| Q001 | R | 24.84 | 0.10 | 0.37 | -0.07 |
+| Q002 | L | 23.90 | 0.67 | 0.15 | 0.67 |
+
+You can instead give one column of predictions per model plus the reference value, and name it with `truth=` (CLI
+`--truth`); the errors are then prediction - truth, with identical results.
+
+**Classifiers**: a patient ID column, the **0/1 diagnosis** (reference standard) and one column of predicted
+probabilities per model. The diagnosis is required, because AUC, sensitivity and specificity are defined by it.
+
+| patient_id | eye | truth | model_A | model_B | model_C |
+|---|---|---|---|---|---|
+| P001 | R | 1 | 0.69 | 0.70 | 0.88 |
+| P001 | L | 0 | 0.26 | 0.18 | 0.82 |
+
+* `patient_id`: eyes sharing an ID are kept together (detected automatically from common names).
+* With `task="auto"` (the default), a column with a common reference name (`truth`, `reference`, `diagnosis`,
+  `measured`, `label`, `y`, ...; see `TRUTH_VARIANTS`) is used as the reference if you do not name one, and the task
+  is binary when that column is 0/1 and every model value lies in [0, 1]. With no such column the model columns are
+  taken as prediction errors. Name the columns with `models=`, `truth=` and `patient=` (`--models`, `--truth`,
+  `--patient`) to avoid guessing.
+* Model columns: every numeric column other than the patient, reference and subgroup columns and common metadata
+  (`eye`, `age`, `axial_length`, ...; see `GENERIC_IGNORE`). Other columns are ignored unless used as a subgroup.
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+# continuous output, prediction errors, results also by axial length
+python ophthalmology_stats.py examples/example_continuous_errors.csv --subgroup axial_length --cuts 22 24.5 --out results.xlsx
+# continuous output, predictions plus the measured value
+python ophthalmology_stats.py examples/example_continuous.csv --truth truth --subgroup eye --out results.xlsx
+# classifier
+python ophthalmology_stats.py examples/example_classifier.csv --task binary --truth truth --subgroup eye --out results.xlsx
+```
+
+```python
+import pandas as pd
+import ophthalmology_stats as osx
+
+res = osx.analyze(pd.read_csv("examples/example_continuous_errors.csv"), subgroup="axial_length",
+                  settings={"subgroup_cuts": [22, 24.5]})
+osx.write_results_to_excel(res, "results.xlsx")
+# sheets: Results, Statistical Tests, Model Performance, Estimates, Sample
+```
+
+`examples/run_examples.py` makes the three example result files in `examples/` (with 4,999 resamples).
+
+## Subgroups
+
+`subgroup=` (CLI `--subgroup COLUMN`) adds results for each subgroup of a column of any type:
+
+* **nominal** (text, e.g. `eye`, `site`, `device`): one subgroup per level, e.g. `eye = L` and `eye = R`, a simple
+  check that a model trained on one laterality (for example after flipping left-eye images) performs similarly on
+  both;
+* **ordinal** (ordered categories, or a numeric column with at most 10 distinct values): one subgroup per level, in
+  order;
+* **continuous** (e.g. axial length): `subgroup_cuts=[22, 24.5]` (`--cuts 22 24.5`) gives `<22`, `22 to <24.5` and
+  `>=24.5` (each interval includes its lower cut point); `subgroup_bins=3` (`--bins 3`) gives equal-count quantile
+  groups (tertiles), labeled with the range of values each holds. A numeric column with more than 10 distinct
+  values and neither option is split into tertiles, and the output says so.
+
+The subgroup column is never taken as a model: the models are found once, on all eyes, and used for every group.
+The Sample sheet gives each group's definition, e.g. `axial_length 22 to <24.5: 238 eyes, 154 patients`. Each
+subgroup is analyzed separately, so p-values and intervals are adjusted for the model pairs within the group, not
+across groups. A patient's two eyes can fall in different subgroups of a continuous column; within each subgroup the
+patient is still the unit. Eyes with no value are in All only.
+
 ## Metrics and tests
 
 | Output | Metric | Test (patient as the unit) |
@@ -27,18 +103,8 @@ used for the new metrics.
 
 Each model's own performance on every metric is given with a patient-level 95% confidence interval (percentile
 bootstrap resampling patients, so that fellow eyes stay together). Every difference between two models comes with
-a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down for the bootstrap tests,
-Hommel otherwise). The unadjusted interval can exclude zero next to a non-significant adjusted p-value, so MPE, MAE,
-MedAE, Brier score and log-loss differences also get an adjusted 95% interval, in the columns ending `CI adj low` /
-`CI adj high` (`ci_adj_low` / `ci_adj_high` in the Estimates sheet): the difference ± c × its standard error, with c
-matching the `fwer_method` chosen for the adjusted p-values. Romano-Wolf (default) gives simultaneous max-|t|
-intervals (c is the quantile of the largest bootstrap |t| across the comparisons in the group). Bonferroni gives
-Bonferroni intervals. Holm and Hommel also get Bonferroni intervals, because these stepwise methods have no
-compatible finite intervals, so an interval can include 0 next to a significant adjusted p-value. Benjamini-Hochberg
-gives Benjamini-Yekutieli false-coverage-rate intervals. Other methods, RMSE (tested on the MSE scale), SD, AUC and
-proportions have no adjusted interval; with a single comparison the adjusted interval equals the unadjusted one.
-Bonferroni-type intervals use the far tail of the bootstrap distribution, so use more resamples (e.g. 9,999) with them. For each metric the
-output also reports:
+a 95% confidence interval, a p-value, an adjusted p-value and an adjusted 95% confidence interval. For each metric
+the output also reports:
 
 * **ρΔ** (column `rho_delta`): the fellow-eye correlation of the per-eye difference in loss between the two
   models. This, not the correlation of the outcome itself, decides how far eye-level tests are misled and how much
@@ -46,40 +112,29 @@ output also reports:
 * **one_eye_factor**: how many times more patients a study keeping one eye per patient would need for the same
   precision (design effect for unequal cluster sizes).
 
-## Input
+## Adjusted p-values and confidence intervals
 
-A CSV or pandas DataFrame with **one row per eye**:
+Adjustment is over the m model pairs of each metric within a group. The unadjusted interval can exclude zero next
+to a non-significant adjusted p-value, so every metric also has an adjusted interval (columns ending `CI adj low` /
+`CI adj high` in the Results sheet; `ci_adj_low` / `ci_adj_high` in the Estimates sheet). The Estimates sheet states
+the adjustment of every row in `p_adj_method` and `ci_adj_method`, and the Statistical Tests sheet summarizes them.
+With the default `fwer_method="romano_wolf"`:
 
-| patient_id | eye | truth | model_A | model_B | ... |
-|---|---|---|---|---|---|
-| P001 | R | 1 | 0.69 | 0.70 | |
-| P001 | L | 0 | 0.26 | 0.18 | |
-| P002 | R | 0 | 0.01 | 0.00 | |
+| Metric | Adjusted p-value (`p_adj_method`) | Adjusted interval (`ci_adj_method`) |
+|---|---|---|
+| Mean error, MAE, MedAE, Brier score, log-loss | Romano-Wolf step-down | Romano-Wolf simultaneous (max-\|t\|): difference ± c × SE, c the 95% quantile of the largest bootstrap \|t\| across the pairs |
+| RMSE, SD | Romano-Wolf step-down | Bonferroni: percentile interval of the same patient resamples at level 1 - 0.05/m |
+| Proportion within a tolerance, sensitivity, specificity, accuracy | Hommel | Bonferroni: percentile interval of the same patient resamples at level 1 - 0.05/m |
+| AUC | Hommel | Bonferroni: difference ± z(1 - 0.05/2m) × SE (Obuchowski or DeLong SE) |
 
-* `patient_id`: eyes sharing an ID are kept together (detected automatically from common names).
-* `truth`: the 0/1 reference standard (classifiers) or the measured value (continuous outputs). For continuous
-  outputs the model columns may instead hold the prediction errors, with no truth column.
-* One column per model: a predicted probability (classifiers) or a prediction (continuous outputs).
-* Other columns (e.g. `eye`, `age`) are ignored unless used as a subgroup.
-
-## Quick start
-
-```bash
-pip install -r requirements.txt
-python ophthalmology_stats.py examples/example_classifier.csv --task binary --subgroup eye --out results.xlsx
-```
-
-```python
-import pandas as pd
-import ophthalmology_stats as osx
-
-res = osx.analyze(pd.read_csv("examples/example_classifier.csv"), task="binary", subgroup="eye")
-osx.write_results_to_excel(res, "results.xlsx")
-# sheets: Results, Statistical Tests, Model Performance, Estimates, Sample
-```
-
-`subgroup="eye"` adds results for right and left eyes separately, a simple check that a model trained on one
-laterality (for example after flipping left-eye images) performs similarly on both.
+With `fwer_method="bonferroni"`, `"holm"` or `"hommel"` every p-value uses that method and every interval is a
+Bonferroni interval (Holm and Hommel have no compatible finite intervals, so an interval can include 0 next to a
+significant adjusted p-value). `"fdr_bh"` gives Benjamini-Yekutieli false-coverage-rate intervals (level 1 - Rα/m, R
+the number of significant pairs). Other methods give no adjusted interval, and `ci_adj_method` says so. With a single
+model pair no adjustment is needed: the adjusted p-value and interval equal the unadjusted ones, and the output says
+so. RMSE, SD, AUC and proportions are tested with other statistics (the MSE scale, Morgan-Pitman, Hommel), so their
+Bonferroni intervals need not agree exactly with `p_adj`. Bonferroni-type intervals use the far tail of the
+bootstrap distribution, so use more resamples (e.g. 9,999) with them, especially for many models.
 
 ## Options (`settings=`)
 
@@ -87,18 +142,22 @@ laterality (for example after flipping left-eye images) performs similarly on bo
 |---|---|---|
 | `bootstrap_iterations` | 4999 | resamples; p-values fall on a grid of 1/5000 |
 | `seed` | 42 | fixed for reproducible results |
-| `fwer_method` | `romano_wolf` | or `holm`, `hommel`, `fdr_bh`, `none` |
+| `fwer_method` | `romano_wolf` | or `bonferroni`, `holm`, `hommel`, `fdr_bh`, `none` |
 | `weighting` | `eye` | mean-loss metrics: `eye` (every eye once), `patient` (every patient once), `optimal` (minimum variance) |
 | `threshold` | 0.5 | classifiers: probability threshold for sensitivity, specificity and accuracy |
 | `within` | 0.5 | continuous: tolerance for the proportion of eyes with abs(error) <= within |
+| `subgroup_cuts` | None | continuous subgroup: cut points, e.g. `[22, 24.5]` (CLI `--cuts 22 24.5`) |
+| `subgroup_bins` | None | continuous subgroup: number of equal-count quantile groups, e.g. `3` (CLI `--bins 3`) |
 | `one_eye` | False | keep one randomly chosen eye per patient |
 | `unit` | `patient` | `eye` treats every eye as independent (for comparison only; not valid with both eyes) |
 | `metrics` | all | a subset of the metrics for the task |
 
 ## Validation
 
-`tests/test_ophthalmology_stats.py` checks, among other things, that continuous-output results are identical to
-biometry_stats_advanced and that the clustered AUC equals DeLong's when every patient has one eye. The Monte Carlo
+`tests/test_ophthalmology_stats.py` (run `python tests/test_ophthalmology_stats.py`) checks, among other things,
+that continuous-output results are identical to biometry_stats_advanced, that prediction errors give the same
+results as predictions plus a truth column, that the clustered AUC equals DeLong's when every patient has one eye,
+and that the Bonferroni intervals equal the unadjusted intervals at level 1 - 0.05/m. The Monte Carlo
 simulation that validates the type I error, power and precision of every test is in `paper/simulation`, with its
 random seeds. `paper/realdata/papila_example.py` repeats the comparison on real data: two image models and the
 cup-to-disc ratio on both eyes of the 244 patients in PAPILA (Kovalyk et al, Sci Data 2022;9:291), and
@@ -109,6 +168,6 @@ not included; the script reads PAPILA.zip as downloaded from figshare (doi:10.60
 
 Moussa G, et al. Keeping both eyes when comparing ophthalmic artificial intelligence models: open-source code and simulation study. (in preparation)
 
-## Licence
+## License
 
 MIT. See LICENSE.

@@ -99,7 +99,7 @@ def n80(d):
 
 # ---------------------------------------------------------------------------------------------- Figure 1
 def figure_designs():
-    """Figure 1: a categorisation of study designs that apply AI to eyes, showing where the second eye matters."""
+    """Figure 1: a categorization of study designs that apply AI to eyes, showing where the second eye matters."""
     from matplotlib.patches import Rectangle
     fig, ax = plt.subplots(figsize=(7.0, 4.3))
     ax.set_xlim(0, 1); ax.set_ylim(0.16, 1.0); ax.axis("off")
@@ -141,7 +141,7 @@ def figure_designs():
               "Both eyes of some patients\nare in the test set, each\nwith its own result")
     results = ("One result per patient.\nStandard tests apply.",
                "Standard tests apply, but\nless data are used, and\nthe result can depend on\nwhich eye was kept.",
-               "Fellow eyes are correlated,\nso analyse with the patient\nas the unit. Treating eyes\nas independent "
+               "Fellow eyes are correlated,\nso analyze with the patient\nas the unit. Treating eyes\nas independent "
                "overstates\nprecision.")
     y4 = 0.43
     for i, (x, hd, bd, rs) in enumerate(zip(xs, heads, bodies, results)):
@@ -150,7 +150,7 @@ def figure_designs():
         box(x, y4, w, h(5, head=False), body=rs, lw=1.8 if i == 2 else 0.7)
     arrow(xl, 0.84 - h(4), xl, y4)
     box(xl, y4, wl, h(5), head="Association analysis",
-        body="Both eyes enter a\nregression with the\npatient as the unit, for\nexample generalised\nestimating equations")
+        body="Both eyes enter a\nregression with the\npatient as the unit, for\nexample generalized\nestimating equations")
     ax.text(xs[2], y4 - h(5, head=False) - 0.012, "Focus of this study", ha="center", va="top", fontsize=7,
             fontstyle="italic")
     save(fig, "Figure1")

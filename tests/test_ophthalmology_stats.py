@@ -8,6 +8,7 @@ seed, so it is an extension of that library, not a different method.
 import os
 import sys
 import tempfile
+import warnings
 import importlib.util
 
 import numpy as np
@@ -185,7 +186,8 @@ def test_adjusted_cis():
     check("adjusted CIs contain the difference (MPE, MAE, MedAE)", ok_contain)
     check("adjusted CIs are wider than unadjusted ones", ok_wider)
     check("an adjusted CI excluding 0 always has Romano-Wolf p_adj <= 0.05", ok_consistent)
-    check("no adjusted RMSE interval under the bootstrap-t", not any("RMSE" in c and "adj low" in c for c in wide.columns))
+    check("RMSE (tested on the MSE scale) gets the Bonferroni percentile interval, not a max-|t| one",
+          bool((long[long.metric == "rmse"].ci_adj_method == "Bonferroni (percentile bootstrap)").all()))
     lmae = long[long.metric == "mae"]
     check("long table carries the adjusted CIs", np.allclose(lmae["ci_adj_low"].values, wide[f"MAE Diff {lbl} adj low"].values))
     w1, _, _ = osx.compare_models(df[["patient_id", "F0", "F1"]], task="continuous",
@@ -219,6 +221,199 @@ def test_adjusted_cis_follow_fwer_method():
                                                                      "verbose": False})
     check("no adjusted CIs for other methods, and the methodology says so",
           not any(" adj " in c for c in w.columns) and info["methodology"]["Adjusted Confidence Intervals"].startswith("None"))
+
+
+def with_axial_length(n_pat=240, seed=8):
+    """iol_like_data with a numeric axial length per eye (fellow eyes alike) and a nominal site per patient."""
+    df = iol_like_data(n_pat=n_pat, seed=seed)
+    rng = np.random.default_rng(seed)
+    pid = df.patient_id.str[1:].astype(int).values
+    df["axial_length_mm"] = np.round(rng.normal(23.5, 1.2, n_pat)[pid] + rng.normal(0, 0.1, len(df)), 2)
+    df["site"] = rng.choice(["north", "south", "east"], n_pat)[pid]
+    return df
+
+
+def _same_frames(a, b):
+    if list(a.columns) != list(b.columns) or len(a) != len(b):
+        return False
+    for c in a.columns:
+        x, y = a[c], b[c]
+        if pd.api.types.is_numeric_dtype(x):
+            if not np.array_equal(x.values.astype(float), y.values.astype(float), equal_nan=True):
+                return False
+        elif list(x.astype(str)) != list(y.astype(str)):
+            return False
+    return True
+
+
+def test_prediction_errors_are_the_primary_input():
+    pred = pd.read_csv(os.path.join(ROOT, "examples", "example_continuous.csv"))
+    models = ["model_A", "model_B", "model_C"]
+    pe = pred.drop(columns=["truth"])
+    for m in models:
+        pe[m] = pred[m] - pred["truth"]                     # prediction errors: prediction minus reference
+    s = {"bootstrap_iterations": 499, "verbose": False}
+    w1, l1, i1 = osx.compare_models(pe, task="auto", settings=s)
+    w2, l2, i2 = osx.compare_models(pred, task="continuous", truth="truth", settings=s)
+    check("task='auto' with no reference column: continuous, the model columns taken as prediction errors",
+          i1["task"] == "continuous" and i1["truth"] is None and i1["models"] == models)
+    check("prediction errors give exactly the same results as predictions plus a truth column",
+          _same_frames(w1, w2) and _same_frames(l1, l2) and i1["model_performance"] == i2["model_performance"])
+    a1 = osx.analyze(pe, subgroup="eye", settings=s)
+    a2 = osx.analyze(pred, truth="truth", subgroup="eye", settings=s)
+    check("analyze: prediction errors and predictions plus truth agree in every group",
+          _same_frames(a1, a2) and _same_frames(pd.DataFrame(a1.attrs["long"]), pd.DataFrame(a2.attrs["long"])))
+    check("task='auto' still uses a column named like a reference (truth) as the reference",
+          osx.compare_models(pred, task="auto", settings=s)[2]["truth"] == "truth")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        osx._detect_columns(pred, "continuous", None, None, None)
+    check("task='continuous' without truth warns that a column named 'truth' is analyzed as a model",
+          any("truth" in str(x.message) for x in caught))
+
+
+def test_nominal_subgroup():
+    df = with_axial_length().drop(columns=["axial_length_mm"])
+    s = {"bootstrap_iterations": 299, "verbose": False}
+    res = osx.analyze(df, task="continuous", subgroup="site", settings=s)
+    check("nominal subgroup: one group per level", set(res.Group) == {"All", "site = east", "site = north", "site = south"})
+    sub = df[df.site == "north"]
+    w, _, info = osx.compare_models(sub, task="continuous", models=["F0", "F1", "F2", "F3"], settings=s,
+                                    group_name="site = north")
+    mine = res[res.Group == "site = north"].reset_index(drop=True)
+    check("a subgroup's results equal compare_models on its eyes", _same_frames(mine, w))
+    d = res.attrs["group_info"]["site = north"]["definition"]
+    check("group_info records the definition with eyes and patients",
+          d == f"site = north: {info['n_eyes']} eyes, {info['n_patients']} patients")
+
+
+def test_continuous_subgroup():
+    df = with_axial_length()
+    models = ["F0", "F1", "F2", "F3"]
+    s = {"bootstrap_iterations": 299, "verbose": False}
+    check("without the subgroup argument a numeric column such as axial_length_mm would be taken as a model",
+          "axial_length_mm" in osx._detect_columns(df, "auto", None, None, None)[1])
+    res = osx.analyze(df, subgroup="axial_length_mm", settings={**s, "subgroup_cuts": [24.5, 22]})
+    names = ["All", "axial_length_mm <22", "axial_length_mm 22 to <24.5", "axial_length_mm >=24.5"]
+    check("cut points give <22, 22 to <24.5 and >=24.5", list(dict.fromkeys(res.Group)) == names)
+    gi = res.attrs["group_info"]
+    long = pd.DataFrame(res.attrs["long"])
+    check("the subgroup column is never a model", all(gi[g]["models"] == models for g in names)
+          and "axial_length_mm" not in set(long.model_a) | set(long.model_b))
+    al = df.axial_length_mm
+    n_mid = int(((al >= 22) & (al < 24.5)).sum())
+    k_mid = df[(al >= 22) & (al < 24.5)].patient_id.nunique()
+    check("each cut-point group holds the right eyes, and its definition says so",
+          gi["axial_length_mm 22 to <24.5"]["definition"] == f"axial_length_mm 22 to <24.5: {n_mid} eyes, {k_mid} patients"
+          and gi["axial_length_mm <22"]["n_eyes"] == int((al < 22).sum()))
+    w, _, _ = osx.compare_models(df[al >= 24.5], task="continuous", models=models, settings=s,
+                                 group_name="axial_length_mm >=24.5")
+    check("a cut-point group's results equal compare_models on its eyes",
+          _same_frames(res[res.Group == "axial_length_mm >=24.5"].reset_index(drop=True), w))
+    rb = osx.analyze(df, subgroup="axial_length_mm", settings={**s, "subgroup_bins": 3})
+    gb = [g for g in rb.attrs["group_info"] if g != "All"]
+    sizes = [rb.attrs["group_info"][g]["n_eyes"] for g in gb]
+    check("bins=3 gives tertiles with (up to ties) equal numbers of eyes, labeled with their ranges",
+          len(gb) == 3 and all("tertile" in g and " to " in g for g in gb)
+          and max(sizes) - min(sizes) <= 0.03 * len(df) and sum(sizes) == len(df))
+    rd = osx.analyze(df, subgroup="axial_length_mm", settings=s)
+    sub_row = [r for r in rd.attrs["methodology_summary"] if r["Test Category"] == "Subgroups"]
+    check("a numeric column with more than 10 values and no cuts or bins: tertiles by default, and the output says so",
+          [g for g in rd.attrs["group_info"] if g != "All"] == gb and sub_row and "by default" in sub_row[0]["Methodology Applied"])
+    small = with_axial_length(n_pat=60, seed=9)[["patient_id", "F0", "F1", "axial_length_mm"]]
+    tmp = tempfile.mkdtemp()
+    small.to_csv(os.path.join(tmp, "e.csv"), index=False)
+    cli = osx._command_line([os.path.join(tmp, "e.csv"), "--subgroup", "axial_length_mm", "--bins", "2",
+                             "--out", os.path.join(tmp, "e.xlsx")])
+    check("command line: --subgroup COLUMN --bins Q", set(cli.attrs["group_info"]) == {"All", *[g for g in cli.Group if g != "All"]}
+          and len(set(cli.Group)) == 3 and os.path.exists(os.path.join(tmp, "e.xlsx")))
+
+
+def test_adjusted_cis_for_every_metric():
+    s = {"bootstrap_iterations": 999, "verbose": False}
+    bd = binary_data()                                            # 3 models, 3 pairs
+    w, _, _ = osx.compare_models(bd, task="binary", settings=s)
+    q3 = 1 - 0.05 / 3
+    w3, _, _ = osx.compare_models(bd, task="binary", settings={**s, "ci_level": q3})
+    ok_present, ok_wider, ok_bonf = True, True, True
+    for m in ("AUC", "Sensitivity", "Specificity", "Accuracy"):
+        lo, hi = w.get(f"{m} Diff 95% CI adj low"), w.get(f"{m} Diff 95% CI adj high")
+        ok_present &= lo is not None and hi is not None
+        if lo is None:
+            continue
+        width, width0 = hi - lo, w[f"{m} Diff 95% CI high"] - w[f"{m} Diff 95% CI low"]
+        ok_wider &= bool((width >= width0 - 1e-12).all() and (width > width0).any())
+        ok_bonf &= np.allclose(lo, w3[f"{m} Diff {q3 * 100:g}% CI low"], rtol=1e-9, atol=1e-12) and \
+            np.allclose(hi, w3[f"{m} Diff {q3 * 100:g}% CI high"], rtol=1e-9, atol=1e-12)
+    check("adjusted CIs for AUC, sensitivity, specificity and accuracy", ok_present)
+    check("with 3 models they are wider than the unadjusted CIs", ok_wider)
+    check("they are Bonferroni intervals: equal to the unadjusted CIs at level 1 - 0.05/3", ok_bonf)
+    ratio = (w["AUC Diff 95% CI adj high"] - w["AUC Diff 95% CI adj low"]) / (w["AUC Diff 95% CI high"] - w["AUC Diff 95% CI low"])
+    check("AUC: difference ± z(1 - α/2m) × SE", np.allclose(ratio, osx.stats.norm.ppf(1 - 0.05 / 6) / osx.stats.norm.ppf(0.975)))
+    df = iol_like_data(seed=5).drop(columns=["eye"])              # 4 models, 6 pairs
+    q6 = 1 - 0.05 / 6
+    ok = True
+    for weighting in ("eye", "patient"):
+        st = {**s, "weighting": weighting}
+        wc, _, _ = osx.compare_models(df, task="continuous", settings=st)
+        wc6, _, _ = osx.compare_models(df, task="continuous", settings={**st, "ci_level": q6})
+        for m in ("RMSE", "SD", "McNemar"):
+            lo, hi = wc[f"{m} Diff 95% CI adj low"], wc[f"{m} Diff 95% CI adj high"]
+            ok &= bool(((hi - lo) > (wc[f"{m} Diff 95% CI high"] - wc[f"{m} Diff 95% CI low"])).all())
+            ok &= np.allclose(lo, wc6[f"{m} Diff {q6 * 100:g}% CI low"], rtol=1e-9, atol=1e-12) and \
+                np.allclose(hi, wc6[f"{m} Diff {q6 * 100:g}% CI high"], rtol=1e-9, atol=1e-12)
+    check("RMSE, SD and proportion within: Bonferroni percentile intervals, wider than unadjusted (eye and patient weights)", ok)
+    w1, _, _ = osx.compare_models(bd[["patient_id", "truth", "M0", "M1"]], task="binary", settings=s)
+    wc1, _, _ = osx.compare_models(df[["patient_id", "F0", "F1"]], task="continuous", settings=s)
+    same = all(np.allclose(ww[f"{m} Diff 95% CI adj {e}"], ww[f"{m} Diff 95% CI {e}"]) for ww, ms in
+               ((w1, ("AUC", "Sensitivity", "Specificity", "Accuracy")), (wc1, ("RMSE", "SD", "McNemar")))
+               for m in ms for e in ("low", "high"))
+    check("single pair: the new adjusted CIs equal the unadjusted ones", same)
+
+
+def test_adjustment_method_columns():
+    s = {"bootstrap_iterations": 499, "verbose": False}
+    df = iol_like_data(seed=5).drop(columns=["eye"])
+    _, lc, info = osx.compare_models(df, task="continuous", settings=s)
+    pm = lc.drop_duplicates("metric").set_index("metric")
+    rw, bt, pct = "Romano-Wolf step-down", "Romano-Wolf simultaneous (max-|t|)", "Bonferroni (percentile bootstrap)"
+    check("continuous, Romano-Wolf: p_adj_method and ci_adj_method name the adjustment of every row",
+          lc.p_adj_method.notna().all() and lc.ci_adj_method.notna().all()
+          and all(pm.p_adj_method[m] == rw for m in ("bias", "mae", "rmse", "medae", "sd"))
+          and pm.p_adj_method["within"] == "Hommel"
+          and all(pm.ci_adj_method[m] == bt for m in ("bias", "mae", "medae"))
+          and all(pm.ci_adj_method[m] == pct for m in ("rmse", "sd", "within")))
+    _, lb, _ = osx.compare_models(binary_data(), task="binary", settings=s)
+    pb = lb.drop_duplicates("metric").set_index("metric")
+    check("binary, Romano-Wolf: AUC Hommel / Bonferroni (normal theory), proportions Hommel / Bonferroni percentile",
+          pb.p_adj_method["auc"] == "Hommel" and pb.ci_adj_method["auc"].startswith("Bonferroni (normal theory")
+          and all(pb.p_adj_method[m] == "Hommel" and pb.ci_adj_method[m] == pct for m in ("sensitivity", "specificity", "accuracy"))
+          and all(pb.p_adj_method[m] == rw and pb.ci_adj_method[m] == bt for m in ("brier", "logloss")))
+    _, lh, _ = osx.compare_models(df, task="continuous", settings={**s, "fwer_method": "hommel"})
+    _, lf, _ = osx.compare_models(df, task="continuous", settings={**s, "fwer_method": "fdr_bh"})
+    _, ly, _ = osx.compare_models(df, task="continuous", settings={**s, "fwer_method": "fdr_by"})
+    _, l0, _ = osx.compare_models(df, task="continuous", settings={**s, "report_ci": False})
+    check("other methods are labeled: Hommel / Bonferroni, BH / Benjamini-Yekutieli, fdr_by and report_ci off not available",
+          (lh.p_adj_method == "Hommel").all() and lh.ci_adj_method.str.startswith("Bonferroni").all()
+          and (lf.p_adj_method == "Benjamini-Hochberg (FDR)").all()
+          and lf.ci_adj_method.str.startswith("Benjamini-Yekutieli").all()
+          and ly.ci_adj_method.str.startswith("not available").all()
+          and l0.ci_adj_method.str.startswith("not available").all())
+    _, l1, i1 = osx.compare_models(df[["patient_id", "F0", "F1"]], task="continuous", settings=s)
+    check("single pair: adjusted equals unadjusted, and the output says so",
+          (l1.p_adj_method == osx.SINGLE_P).all() and (l1.ci_adj_method == osx.SINGLE_CI).all()
+          and np.allclose(l1.p_adj, l1.p) and "single model pair" in i1["methodology"]["Adjusted p-values (p_adj)"].lower())
+    res = osx.analyze(binary_data(), task="binary", subgroup="eye", settings=s)
+    path = os.path.join(tempfile.mkdtemp(), "r.xlsx")
+    osx.write_results_to_excel(res, path)
+    est = pd.read_excel(path, sheet_name="Estimates")
+    tests = pd.read_excel(path, sheet_name="Statistical Tests").set_index("Test Category")["Methodology Applied"]
+    sample = pd.read_excel(path, sheet_name="Sample")
+    check("Excel: method columns in Estimates, adjustments summarized in Statistical Tests, definitions in Sample",
+          {"p_adj_method", "ci_adj_method", "ci_adj_low", "ci_adj_high"} <= set(est.columns)
+          and est.ci_adj_low[est.metric == "auc"].notna().all()
+          and "Hommel: AUC" in tests["Adjusted p-values (p_adj)"] and "AUC" in tests["Adjusted Confidence Intervals"]
+          and "Subgroups" in tests.index and sample.definition.str.contains("eyes").all())
 
 
 def test_ties():

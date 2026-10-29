@@ -39,4 +39,12 @@ for name, sd in (("model_A", 0.25), ("model_B", 0.30), ("model_C", 0.40)):
     cont[name] = np.round(measured + shared + rng.normal(0, sd, n), 2)
 pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "truth": measured, **cont}).to_csv(
     "example_continuous.csv", index=False)
-print("written example_classifier.csv and example_continuous.csv")
+
+# the same continuous example given as prediction errors (prediction minus measured value), the primary input for
+# continuous outputs, with an axial length per eye (fellow eyes alike) for a continuous subgroup; drawn after the
+# data above, so those files are unchanged
+axial_length = np.round(rng.normal(23.6, 1.3, size=pid.max() + 1)[pid] + rng.normal(0, 0.12, n), 2)
+errors = {name: np.round(pred - measured, 2) for name, pred in cont.items()}
+pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "axial_length": axial_length, **errors}).to_csv(
+    "example_continuous_errors.csv", index=False)
+print("written example_classifier.csv, example_continuous.csv and example_continuous_errors.csv")
