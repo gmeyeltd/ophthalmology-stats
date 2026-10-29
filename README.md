@@ -141,8 +141,9 @@ python ophthalmology_stats.py errors.csv --cross axial_length:cuts=22.5,24.5 mea
 | | Sensitivity, specificity, accuracy | Clustered McNemar test (Yang, Sun & Hardin 2010); McNemar with continuity correction when no patient has both eyes |
 
 Each model's own performance on every metric is given with a patient-level 95% confidence interval (percentile
-bootstrap resampling patients, so that fellow eyes stay together). Every difference between two models comes with
-a 95% confidence interval, a p-value, an adjusted p-value and an adjusted 95% confidence interval. For each metric
+bootstrap resampling patients, so that fellow eyes stay together; not adjusted, as it describes one model). Every
+difference between two models comes with a 95% confidence interval, a p-value and an adjusted p-value, and an
+adjusted 95% confidence interval where one matches the adjusted p-value (see below). For each metric
 the output also reports:
 
 * **ρΔ** (column `rho_delta`): the fellow-eye correlation of the per-eye difference in loss between the two
@@ -153,27 +154,26 @@ the output also reports:
 
 ## Adjusted p-values and confidence intervals
 
-Adjustment is over the m model pairs of each metric within a group. The unadjusted interval can exclude zero next
-to a non-significant adjusted p-value, so every metric also has an adjusted interval (columns ending `CI adj low` /
-`CI adj high` in the Results sheet; `ci_adj_low` / `ci_adj_high` in the Estimates sheet). The Estimates sheet states
-the adjustment of every row in `p_adj_method` and `ci_adj_method`, and the Statistical Tests sheet summarizes them.
-With the default `fwer_method="romano_wolf"`:
+Adjustment is over the m model pairs of each metric within a group. An adjusted interval is given only where it
+matches the adjusted p-value, so the two cannot point different ways (columns ending `CI adj low` / `CI adj high` in
+the Results sheet; `ci_adj_low` / `ci_adj_high` in the Estimates sheet). The Estimates sheet states the adjustment
+of every row in `p_adj_method` and `ci_adj_method`, and the Statistical Tests sheet summarizes them. With the
+default `fwer_method="romano_wolf"`:
 
 | Metric | Adjusted p-value (`p_adj_method`) | Adjusted interval (`ci_adj_method`) |
 |---|---|---|
 | Mean error, MAE, MedAE, Brier score, log-loss | Romano-Wolf step-down | Romano-Wolf simultaneous (max-\|t\|): difference ± c × SE, c the 95% quantile of the largest bootstrap \|t\| across the pairs |
-| RMSE, SD | Romano-Wolf step-down | Bonferroni: percentile interval of the same patient resamples at level 1 - 0.05/m |
-| Proportion within a tolerance, sensitivity, specificity, accuracy | Hommel | Bonferroni: percentile interval of the same patient resamples at level 1 - 0.05/m |
-| AUC | Hommel | Bonferroni: difference ± z(1 - 0.05/2m) × SE (Obuchowski or DeLong SE) |
+| RMSE, SD | Romano-Wolf step-down (on the MSE; Morgan-Pitman) | none: the p-value comes from a different statistic, so the CI is unadjusted |
+| Proportion within a tolerance, sensitivity, specificity, accuracy, AUC | Hommel | none: Hommel has no matching interval, so the CI is unadjusted |
 
-With `fwer_method="bonferroni"`, `"holm"` or `"hommel"` every p-value uses that method and every interval is a
-Bonferroni interval (Holm and Hommel have no compatible finite intervals, so an interval can include 0 next to a
-significant adjusted p-value). `"fdr_bh"` gives Benjamini-Yekutieli false-coverage-rate intervals (level 1 - Rα/m, R
-the number of significant pairs). Other methods give no adjusted interval, and `ci_adj_method` says so. With a single
-model pair no adjustment is needed: the adjusted p-value and interval equal the unadjusted ones, and the output says
-so. RMSE, SD, AUC and proportions are tested with other statistics (the MSE scale, Morgan-Pitman, Hommel), so their
-Bonferroni intervals need not agree exactly with `p_adj`. Bonferroni-type intervals use the far tail of the
-bootstrap distribution, so use more resamples (e.g. 9,999) with them, especially for many models.
+With `fwer_method="bonferroni"` every metric gets Bonferroni p-values and matching Bonferroni intervals (AUC:
+difference ± z(1 - 0.05/2m) × SE; RMSE, SD and proportions: percentile interval of the same patient resamples at
+level 1 - 0.05/m; bootstrap-t metrics: c the 1 - 0.05/m quantile of each pair's bootstrap \|t\|). `"holm"` and
+`"hommel"` adjust the p-values only, as they have no matching intervals. `"fdr_bh"` gives Benjamini-Yekutieli
+false-coverage-rate intervals (level 1 - Rα/m, R the number of significant pairs). `ci_adj_method` says why a row
+has no adjusted interval. With a single model pair no adjustment is needed: the adjusted p-value and interval equal
+the unadjusted ones, and the output says so. Bonferroni-type intervals use the far tail of the bootstrap
+distribution, so use more resamples (e.g. 9,999) with them, especially for many models.
 
 ## Options (`settings=`)
 

@@ -186,8 +186,9 @@ def test_adjusted_cis():
     check("adjusted CIs contain the difference (MPE, MAE, MedAE)", ok_contain)
     check("adjusted CIs are wider than unadjusted ones", ok_wider)
     check("an adjusted CI excluding 0 always has Romano-Wolf p_adj <= 0.05", ok_consistent)
-    check("RMSE (tested on the MSE scale) gets the Bonferroni percentile interval, not a max-|t| one",
-          bool((long[long.metric == "rmse"].ci_adj_method == "Bonferroni (percentile bootstrap)").all()))
+    lr = long[long.metric == "rmse"]
+    check("RMSE (Romano-Wolf p on the MSE scale) gets no adjusted interval, which could disagree with its p_adj",
+          bool(lr.ci_adj_method.str.startswith("not adjusted").all() and lr.ci_adj_low.isna().all()))
     lmae = long[long.metric == "mae"]
     check("long table carries the adjusted CIs", np.allclose(lmae["ci_adj_low"].values, wide[f"MAE Diff {lbl} adj low"].values))
     w1, _, _ = osx.compare_models(df[["patient_id", "F0", "F1"]], task="continuous",
@@ -206,7 +207,7 @@ def test_adjusted_cis_follow_fwer_method():
     lbl = "95% CI"
     df = iol_like_data(seed=5).drop(columns=["eye"])
     widths, ok = {}, True
-    for method in ("romano_wolf", "bonferroni", "holm", "hommel", "fdr_bh"):
+    for method in ("romano_wolf", "bonferroni", "fdr_bh"):
         w, _, info = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 1999, "fwer_method": method,
                                                                          "verbose": False})
         for m in ("MPE", "MAE", "MedAE"):
@@ -215,7 +216,13 @@ def test_adjusted_cis_follow_fwer_method():
         widths[method] = float((w[f"MAE Diff {lbl} adj high"] - w[f"MAE Diff {lbl} adj low"]).mean())
         ok &= method in info["methodology"]["Adjusted Confidence Intervals"].lower().replace("-", "_") or method != "romano_wolf"
     check("adjusted CIs follow fwer_method: an interval excluding 0 is significant under that method", ok)
-    check("Holm and Hommel use the Bonferroni intervals", widths["holm"] == widths["bonferroni"] == widths["hommel"])
+    ok_h = True
+    for method in ("holm", "hommel"):
+        w, lh, info = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 499, "fwer_method": method,
+                                                                          "verbose": False})
+        ok_h &= (not any(" adj " in c for c in w.columns) and lh.ci_adj_method.str.startswith("not adjusted").all()
+                 and info["methodology"]["Adjusted Confidence Intervals"].startswith("None"))
+    check("Holm and Hommel adjust p-values only: no adjusted intervals, and the output says why", ok_h)
     check("Bonferroni intervals are wider than the max-|t| (Romano-Wolf) intervals", widths["bonferroni"] > widths["romano_wolf"])
     w, _, info = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 499, "fwer_method": "fdr_by",
                                                                      "verbose": False})
@@ -332,6 +339,10 @@ def test_continuous_subgroup():
 def test_adjusted_cis_for_every_metric():
     s = {"bootstrap_iterations": 999, "verbose": False}
     bd = binary_data()                                            # 3 models, 3 pairs
+    w_rw, _, _ = osx.compare_models(bd, task="binary", settings=s)
+    check("default (Romano-Wolf / Hommel): no adjusted CIs for the AUC and proportions",
+          not any(f"{m} Diff 95% CI adj low" in w_rw.columns for m in ("AUC", "Sensitivity", "Specificity", "Accuracy")))
+    s = {**s, "fwer_method": "bonferroni"}
     w, _, _ = osx.compare_models(bd, task="binary", settings=s)
     q3 = 1 - 0.05 / 3
     w3, _, _ = osx.compare_models(bd, task="binary", settings={**s, "ci_level": q3})
@@ -345,7 +356,7 @@ def test_adjusted_cis_for_every_metric():
         ok_wider &= bool((width >= width0 - 1e-12).all() and (width > width0).any())
         ok_bonf &= np.allclose(lo, w3[f"{m} Diff {q3 * 100:g}% CI low"], rtol=1e-9, atol=1e-12) and \
             np.allclose(hi, w3[f"{m} Diff {q3 * 100:g}% CI high"], rtol=1e-9, atol=1e-12)
-    check("adjusted CIs for AUC, sensitivity, specificity and accuracy", ok_present)
+    check("Bonferroni: adjusted CIs for AUC, sensitivity, specificity and accuracy", ok_present)
     check("with 3 models they are wider than the unadjusted CIs", ok_wider)
     check("they are Bonferroni intervals: equal to the unadjusted CIs at level 1 - 0.05/3", ok_bonf)
     ratio = (w["AUC Diff 95% CI adj high"] - w["AUC Diff 95% CI adj low"]) / (w["AUC Diff 95% CI high"] - w["AUC Diff 95% CI low"])
@@ -362,7 +373,8 @@ def test_adjusted_cis_for_every_metric():
             ok &= bool(((hi - lo) > (wc[f"{m} Diff 95% CI high"] - wc[f"{m} Diff 95% CI low"])).all())
             ok &= np.allclose(lo, wc6[f"{m} Diff {q6 * 100:g}% CI low"], rtol=1e-9, atol=1e-12) and \
                 np.allclose(hi, wc6[f"{m} Diff {q6 * 100:g}% CI high"], rtol=1e-9, atol=1e-12)
-    check("RMSE, SD and proportion within: Bonferroni percentile intervals, wider than unadjusted (eye and patient weights)", ok)
+    check("Bonferroni: RMSE, SD and proportion within get percentile intervals, wider than unadjusted (eye and patient weights)", ok)
+    s = {**s, "fwer_method": "romano_wolf"}
     w1, _, _ = osx.compare_models(bd[["patient_id", "truth", "M0", "M1"]], task="binary", settings=s)
     wc1, _, _ = osx.compare_models(df[["patient_id", "F0", "F1"]], task="continuous", settings=s)
     same = all(np.allclose(ww[f"{m} Diff 95% CI adj {e}"], ww[f"{m} Diff 95% CI {e}"]) for ww, ms in
@@ -376,25 +388,26 @@ def test_adjustment_method_columns():
     df = iol_like_data(seed=5).drop(columns=["eye"])
     _, lc, info = osx.compare_models(df, task="continuous", settings=s)
     pm = lc.drop_duplicates("metric").set_index("metric")
-    rw, bt, pct = "Romano-Wolf step-down", "Romano-Wolf simultaneous (max-|t|)", "Bonferroni (percentile bootstrap)"
+    rw, bt = "Romano-Wolf step-down", "Romano-Wolf simultaneous (max-|t|)"
+    na = lambda x: str(x).startswith("not adjusted")  # noqa: E731
     check("continuous, Romano-Wolf: p_adj_method and ci_adj_method name the adjustment of every row",
           lc.p_adj_method.notna().all() and lc.ci_adj_method.notna().all()
           and all(pm.p_adj_method[m] == rw for m in ("bias", "mae", "rmse", "medae", "sd"))
           and pm.p_adj_method["within"] == "Hommel"
           and all(pm.ci_adj_method[m] == bt for m in ("bias", "mae", "medae"))
-          and all(pm.ci_adj_method[m] == pct for m in ("rmse", "sd", "within")))
+          and all(na(pm.ci_adj_method[m]) for m in ("rmse", "sd", "within")))
     _, lb, _ = osx.compare_models(binary_data(), task="binary", settings=s)
     pb = lb.drop_duplicates("metric").set_index("metric")
-    check("binary, Romano-Wolf: AUC Hommel / Bonferroni (normal theory), proportions Hommel / Bonferroni percentile",
-          pb.p_adj_method["auc"] == "Hommel" and pb.ci_adj_method["auc"].startswith("Bonferroni (normal theory")
-          and all(pb.p_adj_method[m] == "Hommel" and pb.ci_adj_method[m] == pct for m in ("sensitivity", "specificity", "accuracy"))
+    check("binary, Romano-Wolf: AUC and proportions Hommel, not adjusted; Brier and log-loss simultaneous",
+          pb.p_adj_method["auc"] == "Hommel" and na(pb.ci_adj_method["auc"])
+          and all(pb.p_adj_method[m] == "Hommel" and na(pb.ci_adj_method[m]) for m in ("sensitivity", "specificity", "accuracy"))
           and all(pb.p_adj_method[m] == rw and pb.ci_adj_method[m] == bt for m in ("brier", "logloss")))
     _, lh, _ = osx.compare_models(df, task="continuous", settings={**s, "fwer_method": "hommel"})
     _, lf, _ = osx.compare_models(df, task="continuous", settings={**s, "fwer_method": "fdr_bh"})
     _, ly, _ = osx.compare_models(df, task="continuous", settings={**s, "fwer_method": "fdr_by"})
     _, l0, _ = osx.compare_models(df, task="continuous", settings={**s, "report_ci": False})
-    check("other methods are labeled: Hommel / Bonferroni, BH / Benjamini-Yekutieli, fdr_by and report_ci off not available",
-          (lh.p_adj_method == "Hommel").all() and lh.ci_adj_method.str.startswith("Bonferroni").all()
+    check("other methods are labeled: Hommel / not adjusted, BH / Benjamini-Yekutieli, fdr_by and report_ci off not available",
+          (lh.p_adj_method == "Hommel").all() and lh.ci_adj_method.str.startswith("not adjusted").all()
           and (lf.p_adj_method == "Benjamini-Hochberg (FDR)").all()
           and lf.ci_adj_method.str.startswith("Benjamini-Yekutieli").all()
           and ly.ci_adj_method.str.startswith("not available").all()
@@ -411,7 +424,7 @@ def test_adjustment_method_columns():
     sample = pd.read_excel(path, sheet_name="Sample")
     check("Excel: method columns in Estimates, adjustments summarized in Statistical Tests, definitions in Sample",
           {"p_adj_method", "ci_adj_method", "ci_adj_low", "ci_adj_high"} <= set(est.columns)
-          and est.ci_adj_low[est.metric == "auc"].notna().all()
+          and est.ci_adj_low[est.metric == "auc"].isna().all() and est.ci_adj_low[est.metric == "brier"].notna().all()
           and "Hommel: AUC" in tests["Adjusted p-values (p_adj)"] and "AUC" in tests["Adjusted Confidence Intervals"]
           and "Subgroups" in tests.index and sample.definition.str.contains("eyes").all())
 

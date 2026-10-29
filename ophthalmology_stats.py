@@ -30,12 +30,14 @@ part generalizes it to any model and to classifiers:
                AUC                                       Obuchowski (1997) clustered ROC; DeLong (1988) with one eye
                sensitivity, specificity, accuracy        clustered McNemar (Yang, Sun & Hardin 2010)
 
-Every difference comes with a 95% confidence interval, a p-value, an adjusted p-value (Romano-Wolf step-down
-for the bootstrap tests, Hommel otherwise) and an adjusted 95% interval. The bootstrap-t and MedAE intervals match
-the chosen method (max-|t| simultaneous intervals for Romano-Wolf, Bonferroni for Bonferroni/Holm/Hommel,
-false-coverage-rate intervals for Benjamini-Hochberg); the AUC (normal theory, difference ± z(1 - α/2m) × SE) and
-the RMSE, SD and proportion intervals (percentile bootstrap at level 1 - α/m) get Bonferroni intervals, m being the
-number of model pairs. The columns p_adj_method and ci_adj_method say which adjustment each row got. For each
+Every difference comes with a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down
+for the bootstrap tests, Hommel otherwise). Adjusted 95% intervals are given only where they match the adjusted
+p-value: by default, Romano-Wolf simultaneous (max-|t|) intervals for the mean error, MAE, MedAE, Brier score and
+log-loss. The RMSE, SD, AUC and proportions keep unadjusted intervals, because their adjusted p-values (Romano-Wolf
+from a different statistic, or Hommel) have no matching interval. With fwer_method='bonferroni' every metric gets
+Bonferroni p-values and matching Bonferroni intervals (AUC: difference ± z(1 - α/2m) × SE; RMSE, SD and
+proportions: percentile bootstrap at level 1 - α/m; m = number of model pairs), and with 'fdr_bh'
+Benjamini-Yekutieli intervals. The columns p_adj_method and ci_adj_method say which adjustment each row got. For each
 metric the output also gives ρΔ (column rho_delta), the fellow-eye correlation of the per-eye difference in loss
 between the two models, and the one-eye factor: how many times more patients a study keeping one eye per patient
 would need for the same precision (design effect for unequal cluster sizes; Kerry & Bland 2001). Mean-loss metrics
@@ -57,7 +59,7 @@ or from the command line:
 
 https://github.com/gmeyeltd/ophthalmology-stats (MIT license)
 """
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import numpy as np
 import pandas as pd
@@ -1476,11 +1478,12 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
     the adjustment each got (p_adj_method, ci_adj_method); info describes the sample and the tests used, and
     info["model_performance"] gives each model's own estimate of every metric with its patient-level 95% CI.
 
-    Adjusted intervals are given for every metric when report_ci is on and fwer_method is one of
-    ADJUSTED_CI_METHODS: the bootstrap-t (MPE, MAE, Brier, log-loss) and MedAE intervals by
-    adjusted_ci_critical (max-|t| for Romano-Wolf); AUC as difference ± z(1 - α/2m) × SE; RMSE, SD and proportions
-    as the percentile interval at level 1 - α/m from the same resamples (Bonferroni; Benjamini-Yekutieli
-    1 - Rα/m for fdr_bh), m being the number of model pairs. With a single pair they equal the unadjusted ones.
+    Adjusted intervals are given only where they match the adjusted p-value (_adj_ci_matches): Romano-Wolf
+    simultaneous (max-|t|) intervals for the bootstrap-t metrics (MPE, MAE, Brier, log-loss) and MedAE; with
+    'bonferroni', Bonferroni intervals for every metric (AUC as difference ± z(1 - α/2m) × SE; RMSE, SD and
+    proportions as the percentile interval at level 1 - α/m from the same resamples); with 'fdr_bh',
+    Benjamini-Yekutieli intervals (1 - Rα/m). m is the number of model pairs. With a single pair the adjusted
+    intervals equal the unadjusted ones.
     """
     s = _settings(settings)
     task, models, patient, truth = _detect_columns(df, task, models, patient, truth)
@@ -1683,6 +1686,7 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
     p_methods = {}
     wide = _adjust(wide, rw_stats, s["fwer_method"], p_methods)
     wide = _add_bonferroni_type_cis(wide, task, models, pct_draws, auc_se, s)
+    wide = _drop_unmatched_adjusted_cis(wide, task, s)
     if not long.empty:
         long["p_adj"] = long.apply(lambda r: _lookup_adj(wide, r), axis=1)
         long["p_adj_method"] = [p_methods.get(WIDE_NAMES[m][1], "not available") for m in long["metric"]]
@@ -1835,9 +1839,39 @@ def _add_bonferroni_type_cis(wide, task, models, pct_draws, auc_se, s):
     return wide
 
 
+def _adj_ci_matches(metric, fm):
+    """True if an adjusted interval of this metric matches its adjusted p-value: Romano-Wolf simultaneous intervals
+    for the bootstrap-t metrics (and the MedAE), Bonferroni intervals with Bonferroni p-values, and
+    Benjamini-Yekutieli intervals with Benjamini-Hochberg. Romano-Wolf p-values of the RMSE (tested on the MSE) and
+    SD (Morgan-Pitman), and Hommel or Holm p-values, have no matching interval, so their CIs are left unadjusted
+    rather than given a Bonferroni interval that could disagree with the p-value."""
+    if fm in ("bonferroni", "fdr_bh"):
+        return True
+    return fm == "romano_wolf" and metric in BOOTSTRAP_T_ADJ
+
+
+def _drop_unmatched_adjusted_cis(wide, task, s):
+    """Remove the 'CI adj' columns of metrics whose adjusted p-value has no matching interval (_adj_ci_matches).
+    With a single model pair nothing is adjusted and the columns stay (they equal the unadjusted intervals)."""
+    if wide.empty or len(wide) == 1:
+        return wide
+    lbl = f"{float(s['ci_level']) * 100:g}% CI"
+    drop = []
+    for metric in (CONTINUOUS_METRICS if task == "continuous" else BINARY_METRICS):
+        if not _adj_ci_matches(metric, s["fwer_method"]):
+            drop += [c for c in (f"{WIDE_NAMES[metric][0]} {lbl} adj low", f"{WIDE_NAMES[metric][0]} {lbl} adj high")
+                     if c in wide.columns]
+    return wide.drop(columns=drop)
+
+
 def _ci_adj_label(metric, wide, s, has_clusters=True):
     """How the adjusted interval of a metric was made (column ci_adj_method), or why there is none."""
     fm = s["fwer_method"]
+    if (s["report_ci"] and fm in ADJUSTED_CI_METHODS and len(wide) > 1 and not _adj_ci_matches(metric, fm)):
+        why = ("its Romano-Wolf p-value comes from a different statistic" if fm == "romano_wolf"
+               and metric in ("rmse", "sd") else
+               f"{'Hommel' if fm == 'romano_wolf' else P_ADJ_LABELS.get(fm, fm)} p-values have no matching interval")
+        return f"not adjusted: {why} (the CI is unadjusted; fwer_method='bonferroni' gives matching intervals)"
     if not s["report_ci"]:
         return "not available: no confidence intervals (report_ci=False)"
     if fm in (None, "none"):
@@ -1921,6 +1955,18 @@ def _methodology(long, task, has_clusters, s, n_pairs=None):
         if fm in ADJUSTED_CI_METHODS and single:
             text = ("A single model pair: no adjustment is needed, so the 'CI adj' columns (ci_adj_low, ci_adj_high) "
                     "equal the unadjusted intervals")
+        elif fm in ("romano_wolf", "holm", "hommel"):
+            boot_t = "MPE, MAE and MedAE" if task == "continuous" else "Brier score and log-loss"
+            rest = ("RMSE, SD and the proportion within tolerance" if task == "continuous"
+                    else "AUC, sensitivity, specificity and accuracy")
+            text = ((f"Columns 'CI adj' (Estimates: ci_adj_low, ci_adj_high; method in ci_adj_method), adjusted for the "
+                     f"m = {n_pairs} model pairs of each metric within the group, for the {boot_t} only: "
+                     + adjusted_ci_description("romano_wolf", level) + f". The {rest} have no adjusted interval: their "
+                     "adjusted p-values (Romano-Wolf from a different statistic, or Hommel) have no matching interval, "
+                     "so their CIs are unadjusted")
+                    if fm == "romano_wolf" else
+                    f"None: {fm.capitalize()} p-values have no matching intervals, so the CIs are unadjusted")
+            text += ". fwer_method='bonferroni' gives Bonferroni p-values with matching intervals for every metric"
         elif fm in ADJUSTED_CI_METHODS:
             q = f"1 - R × {alpha}/m (Benjamini-Yekutieli; R = comparisons with p_adj ≤ {alpha})" \
                 if fm == "fdr_bh" else f"1 - {alpha}/m (Bonferroni)"
@@ -1932,9 +1978,8 @@ def _methodology(long, task, has_clusters, s, n_pairs=None):
                     + f"{boot_t}: " + adjusted_ci_description(fm, level) + ". "
                     + (f"AUC: difference ± z × SE, z the normal quantile for coverage {q}. "
                        if task == "binary" else "")
-                    + f"{pct[0].upper() + pct[1:]}: percentile interval of the same patient resamples at coverage {q}. "
-                    "These Bonferroni-type intervals need not agree with p_adj when p_adj comes from another "
-                    "statistic (Romano-Wolf, Hommel); use more resamples (e.g. 9,999) for their far tails")
+                    + f"{pct[0].upper() + pct[1:]}: percentile interval of the same patient resamples at coverage {q}"
+                    "; use more resamples (e.g. 9,999) for their far tails")
         else:
             text = adjusted_ci_description(fm, level)
         m["Adjusted Confidence Intervals"] = text
@@ -2266,7 +2311,7 @@ def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=Non
     return final
 
 
-METRIC_LABELS = {"bias": "Mean error", "mae": "Mean absolute error", "rmse": "Root mean squared error",
+GRID_METRIC_LABELS = {"bias": "Mean error", "mae": "Mean absolute error", "rmse": "Root mean squared error",
                  "medae": "Median absolute error", "sd": "SD of the error", "within": "Proportion within tolerance",
                  "auc": "AUC", "brier": "Brier score", "logloss": "Log-loss", "sensitivity": "Sensitivity",
                  "specificity": "Specificity", "accuracy": "Accuracy"}
@@ -2335,7 +2380,7 @@ def _write_grid_sheet(path, results):
     for metric in metrics:
         sense = ("lower is better" if metric in LOWER_IS_BETTER else "higher is better" if metric in HIGHER_IS_BETTER
                  else "closer to 0 is better")
-        ws.cell(r, 1, f"{METRIC_LABELS.get(metric, metric)} ({sense})").font = Font(bold=True, size=12)
+        ws.cell(r, 1, f"{GRID_METRIC_LABELS.get(metric, metric)} ({sense})").font = Font(bold=True, size=12)
         refs = []
         for k, model in enumerate(models):
             refs += block(r + 1, 1 + k * width, str(model), lambda n, m=model: est.get((n, m, metric)), "0.000")
