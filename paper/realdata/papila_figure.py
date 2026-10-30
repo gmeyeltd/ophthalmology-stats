@@ -58,7 +58,19 @@ def _axis(ax):
     ax.set_xticklabels(["≤0.001", "0.01", "0.05", "0.2", "1"])
     ax.grid(axis="x", color=GRID, lw=0.6, zorder=0)
     ax.tick_params(axis="y", length=0)
-    ax.set_xlabel("P Value for the Difference Between Two Classifiers")
+    ax.set_xlabel("P Value for the Difference\nBetween Two Classifiers")
+
+
+def fit_width(fig, max_w=7.0):
+    """Journal artwork must be no wider than 7 inches: narrow the figure until its tight bounding box (plus the
+    0.1-inch padding savefig adds on each side) fits, keeping the font sizes."""
+    for _ in range(6):
+        fig.canvas.draw()
+        w = fig.get_tightbbox(fig.canvas.get_renderer()).width + 0.2
+        if w <= max_w:
+            return
+        W, H = fig.get_size_inches()
+        fig.set_size_inches(W - (w - max_w) - 0.01, H)
 
 
 def main():
@@ -115,6 +127,7 @@ def main():
                       "One random eye per patient (each of 200 choices)"],
                loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.45, -0.17), handletextpad=0.3,
                columnspacing=1.5)
+    fit_width(fig)
     os.makedirs(a.out, exist_ok=True)
     fig.savefig(os.path.join(a.out, "Figure5.png"), dpi=200, bbox_inches="tight")
     tif = os.path.join(a.out, "Figure5.tiff")

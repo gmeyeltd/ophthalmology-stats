@@ -72,8 +72,21 @@ def panel_label(ax, s, x=-0.14):
     ax.text(x, 1.04, s, transform=ax.transAxes, fontsize=10, fontweight="bold", va="bottom")
 
 
+def fit_width(fig, max_w=7.0):
+    """Journal artwork must be no wider than 7 inches: narrow the figure until its tight bounding box (plus the
+    0.1-inch padding savefig adds on each side) fits, keeping the font sizes."""
+    for _ in range(6):
+        fig.canvas.draw()
+        w = fig.get_tightbbox(fig.canvas.get_renderer()).width + 0.2
+        if w <= max_w:
+            return
+        W, H = fig.get_size_inches()
+        fig.set_size_inches(W - (w - max_w) - 0.01, H)
+
+
 def save(fig, name):
     os.makedirs(FIG, exist_ok=True)
+    fit_width(fig)
     fig.savefig(os.path.join(FIG, f"{name}.png"), dpi=200, bbox_inches="tight")
     tif = os.path.join(FIG, f"{name}.tiff")
     fig.savefig(tif, dpi=600, bbox_inches="tight", pil_kwargs={"compression": "tiff_lzw"})
@@ -281,7 +294,7 @@ def _type1_legend(fig, ax, y):
             "Expected range for a valid test (about 5%)"]
     hd = dict(zip(l_, h_))
     fig.legend([hd[k] for k in want], want, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, y),
-               handletextpad=0.4, markerscale=1.5)
+               handletextpad=0.4, markerscale=1.5, columnspacing=1.0)
 
 
 def figure_type1(s):

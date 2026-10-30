@@ -1,169 +1,172 @@
 """
-ophthalmology_stats: compare the accuracy of prediction models evaluated on eyes (artificial intelligence models,
-formulas, devices), with one or both eyes per patient and the patient as the unit of analysis.
+ophthalmology-stats: compare prediction models evaluated on eyes, when some patients contribute both eyes, with
+the patient as the unit of analysis.
 
-Input: one row per eye, with a patient ID column (eyes sharing an ID are resampled together) and
-  continuous outputs  one column of prediction errors (prediction minus reference) per model. This is the primary
-                      input. Alternatively, one column of predictions per model plus the reference value
-                      (truth=..., --truth); the errors are then prediction - truth.
-  classifiers         one column of predicted probabilities per model plus the 0/1 diagnosis (truth=..., --truth).
-                      The diagnosis is required: AUC, sensitivity and specificity are defined by it.
-With task='auto' (the default of analyze and the command line), a column with a common reference name (truth,
-reference, diagnosis, measured, ...; see TRUTH_VARIANTS) is used as the reference when truth is not given; without
-one, the model columns are taken as prediction errors. Other columns (eye, age, ...) are ignored unless named as a
-subgroup, which can be nominal (e.g. eye), ordinal, or continuous (e.g. axial length, split at cut points or into
-equal-count quantile groups). Several subgroups can be given, each analyzed separately and each with its own cut
-points or number of groups; two of them can also be crossed (e.g. axial length x keratometry, off by default), with
-a 'Grid' sheet of each model's performance in each cell for heat maps.
+Input: one row per eye, with a patient ID column and one column per model holding prediction errors (continuous
+outputs; or predictions plus a reference column given as truth) or predicted probabilities plus the 0/1 diagnosis
+(classifiers). Every pair of models is compared on each metric with a patient-level test, 95% confidence
+interval and adjusted p-value. See README.md.
 
-It extends biometry_stats_advanced (biometry-stats, for intraocular lens formulas), which is included unchanged
-in the first part of this file, so analyze_prediction_errors gives exactly the same results as before. The second
-part generalizes it to any model and to classifiers:
-
-  output       metric                                   test (both eyes, patient as the unit)
-  -----------  ---------------------------------------  ------------------------------------------------------
-  continuous   mean error (MPE/bias), MAE, RMSE          patient bootstrap-t with CR1 standard error (RMSE via MSE)
-               median absolute error (MedAE)             percentile patient bootstrap (ties counted in both tails)
-               SD of the error                           Morgan-Pitman, wild cluster bootstrap (Rademacher, CR0)
-               proportion within a tolerance             clustered McNemar (Yang, Sun & Hardin 2010)
-  binary       Brier score, log-loss                     patient bootstrap-t with CR1 standard error
-               AUC                                       Obuchowski (1997) clustered ROC; DeLong (1988) with one eye
-               sensitivity, specificity, accuracy        clustered McNemar (Yang, Sun & Hardin 2010)
-
-Every difference comes with a 95% confidence interval, a p-value and an adjusted p-value (Romano-Wolf step-down
-for the bootstrap tests, Hommel otherwise). Adjusted 95% intervals are given only where they match the adjusted
-p-value: by default, Romano-Wolf simultaneous (max-|t|) intervals for the mean error, MAE, MedAE, Brier score and
-log-loss. The RMSE, SD, AUC and proportions keep unadjusted intervals, because their adjusted p-values (Romano-Wolf
-from a different statistic, or Hommel) have no matching interval. With fwer_method='bonferroni' every metric gets
-Bonferroni p-values and matching Bonferroni intervals (AUC: difference ± z(1 - α/2m) × SE; RMSE, SD and
-proportions: percentile bootstrap at level 1 - α/m; m = number of model pairs), and with 'fdr_bh'
-Benjamini-Yekutieli intervals. The columns p_adj_method and ci_adj_method say which adjustment each row got. For each
-metric the output also gives ρΔ (column rho_delta), the fellow-eye correlation of the per-eye difference in loss
-between the two models, and the one-eye factor: how many times more patients a study keeping one eye per patient
-would need for the same precision (design effect for unequal cluster sizes; Kerry & Bland 2001). Mean-loss metrics
-can weight every eye equally (default), every patient equally, or use minimum-variance weights.
-
-Quick start
     import pandas as pd, ophthalmology_stats as osx
-    # continuous output: patient_id plus one column of prediction errors per model
-    res = osx.analyze(pd.read_csv("errors.csv"), subgroup="axial_length", settings={"subgroup_cuts": [22, 24.5]})
-    # classifier: patient_id, the 0/1 diagnosis and one column of probabilities per model
-    res = osx.analyze(pd.read_csv("probabilities.csv"), task="binary", truth="diagnosis", subgroup="eye")
+    res = osx.analyze(pd.read_csv("errors.csv"), subgroup="eye")
     osx.write_results_to_excel(res, "results.xlsx")
-or from the command line:
-    python ophthalmology_stats.py errors.csv --subgroup axial_length --cuts 22 24.5
-    python ophthalmology_stats.py errors.csv --subgroup axial_length:cuts=22,24.5,26 --subgroup mean_k:bins=5
-    python ophthalmology_stats.py errors.csv --cross axial_length:cuts=22,26 mean_k:bins=3      (3 x 3 cells, Grid sheet)
-    python ophthalmology_stats.py predictions.csv --truth measured            (predictions plus the reference)
-    python ophthalmology_stats.py probabilities.csv --task binary --truth diagnosis --subgroup eye
+
+    python ophthalmology_stats.py errors.csv --subgroup eye --out results.xlsx
 
 https://github.com/gmeyeltd/ophthalmology-stats (MIT license)
 """
-__version__ = "1.2.0"
+__version__ = "1.3.0"
+
+import re
+import warnings
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
 from statsmodels.stats.multitest import multipletests
-from itertools import combinations
-import warnings
-from concurrent.futures import ThreadPoolExecutor
 
-# Defaults. Most can be overridden through the settings dict passed to analyze_prediction_errors.
-BOOTSTRAP_ITERATIONS = 4999   # with p = (1 + b)/(B + 1), p-values fall on a grid of 1/5000
-
-# Fixed seed so results are reproducible; set to None for a random seed
-BOOTSTRAP_SEED = 42
-
-if BOOTSTRAP_SEED is None:
-    BOOTSTRAP_SEED = int(np.random.default_rng().integers(0, 2**32))
-    print(f"--- [Biometry Stats] Random Bootstrap Seed Generated: {BOOTSTRAP_SEED} ---")
-else:
-    print(f"--- [Biometry Stats] Using Fixed Bootstrap Seed: {BOOTSTRAP_SEED} ---")
-
-# Used when the settings dict does not supply a value
-YUEN_TRIM_PROPORTION = 0.2
-MCNEMAR_THRESHOLD = 0.50
-MULTIPLE_TEST_METHOD = 'romano_wolf'
-FALLBACK_TEST_METHOD = 'hommel'
-INVALID_THRESHOLD = 4.0
-AXL_SHORT_CUTOFF = 22.0
-AXL_LONG_CUTOFF = 26.0
-MIN_GROUP_SIZE = 5      # a group (All, Short, Medium, Long) with fewer valid eyes than this is not tested
-MEDIAN_WINDOW = 5       # bootstrap medians: half-width of the search window, in sqrt(n) eyes (speed only; results are exact)
-RUN_GROUPS_IN_PARALLEL = True   # test All / Short / Medium / Long side by side (speed only; results are identical)
-
-# Which tests to run
-USE_STUDENTIZED_BS = True
-ENFORCE_INDEPENDENCE = False
-RUN_YUEN_TEST = False
-RUN_SD_TEST = True
-REPORT_CI = False    # report each difference between formulas with a bootstrap confidence interval (unadjusted and adjusted)
+BOOTSTRAP_ITERATIONS = 4999       # p-values fall on a grid of 1/5000
+BOOTSTRAP_SEED = 42               # fixed, so results are reproducible
 CI_LEVEL = 0.95
+MCNEMAR_THRESHOLD = 0.50          # default tolerance for the proportion of eyes with |error| <= within
+MULTIPLE_TEST_METHOD = "romano_wolf"
+FALLBACK_TEST_METHOD = "hommel"   # under Romano-Wolf, for tests without bootstrap null distributions
+MIN_GROUP_SIZE = 5                # groups with fewer valid eyes are not tested
+MEDIAN_WINDOW = 5                 # bootstrap medians: search window in sqrt(n) eyes (speed only; results are exact)
 
-# ------------------------------------------------------------------------------
+CONTINUOUS_METRICS = ["bias", "mae", "rmse", "medae", "sd", "within"]
+BINARY_METRICS = ["auc", "brier", "logloss", "sensitivity", "specificity", "accuracy"]
+MEAN_LOSS_METRICS = {"bias", "mae", "rmse", "brier", "logloss"}
+# taken as the reference when truth is not given (task 'auto' or 'binary'); with none, task 'auto' reads the model
+# columns as prediction errors
+TRUTH_VARIANTS = ['truth', 'reference', 'reference_standard', 'ground_truth', 'groundtruth', 'label', 'y', 'y_true',
+                  'target', 'diagnosis', 'outcome', 'actual', 'observed', 'measured', 'gold_standard']
+# numeric columns never taken as models (subgroup columns are excluded too)
+GENERIC_IGNORE = ['axl', 'al', 'axial_length', 'axiallength', 'acd', 'acdepth', 'k1', 'k2', 'meank', 'mean_k', 'k',
+                  'km', 'kmean', 'k_mean', 'avg_k', 'lt', 'lensthickness', 'cct',
+                  'wtw', 'hcd', 'iol_implanted', 'postoperative_refraction', 'corneal_refractive_index', 'eye', 'side',
+                  'laterality', 'od_os', 're_le', 'age', 'gender', 'gender_num', 'sex', 'visit',
+                  'site', 'centre', 'center', 'device', 'image_id', 'imageid']
+SUBGROUP_MAX_LEVELS = 10   # a numeric subgroup with more distinct values is split into tertiles by default
+ADJUSTED_CI_METHODS = ('romano_wolf', 'bonferroni', 'holm', 'hommel', 'fdr_bh')   # methods with adjusted intervals
+P_ADJ_LABELS = {'romano_wolf': 'Romano-Wolf step-down', 'bonferroni': 'Bonferroni', 'holm': 'Holm',
+                'hommel': 'Hommel', 'fdr_bh': 'Benjamini-Hochberg (FDR)', 'fdr_by': 'Benjamini-Yekutieli (FDR)',
+                'sidak': 'Sidak', 'holm-sidak': 'Holm-Sidak', 'simes-hochberg': 'Hochberg',
+                'fdr_tsbh': 'two-stage Benjamini-Hochberg (FDR)',
+                'fdr_tsbky': 'two-stage Benjamini-Krieger-Yekutieli (FDR)'}
+SINGLE_P = "single comparison (p_adj = p)"
+SINGLE_CI = "single comparison (CI adj = CI)"
+
+DEFAULT_SETTINGS = {
+    "bootstrap_iterations": BOOTSTRAP_ITERATIONS,  # resamples (p-values on a grid of 1/(B+1))
+    "seed": None,                  # None: BOOTSTRAP_SEED
+    "fwer_method": MULTIPLE_TEST_METHOD,   # or 'bonferroni', 'holm', 'hommel', 'fdr_bh', 'none'
+    "report_ci": True,             # confidence intervals for every estimate and difference
+    "ci_level": CI_LEVEL,
+    "within": MCNEMAR_THRESHOLD,   # continuous: tolerance for the proportion of eyes with |error| <= within
+    "threshold": 0.5,              # binary: probability threshold for sensitivity, specificity and accuracy
+    "invalid_threshold": None,     # continuous: exclude eyes with |error| above this
+    "weighting": "eye",            # mean-loss metrics: 'eye', 'patient' or 'optimal' (minimum variance)
+    "unit": "patient",             # 'patient' (recommended) or 'eye' (every eye independent; for comparison)
+    "one_eye": False,              # keep one randomly chosen eye per patient
+    "clip": 1e-15,                 # probabilities clipped to [clip, 1 - clip] for log-loss
+    "metrics": None,               # subset of the metrics for the task (default: all)
+    "min_group_size": MIN_GROUP_SIZE,
+    "subgroup_cuts": None,         # numeric subgroup column: cut points, e.g. [22, 24.5] -> <22, 22 to <24.5, >=24.5
+    "subgroup_bins": None,         # numeric subgroup column: number of equal-count quantile groups, e.g. 3 (tertiles)
+    "cross_min_patients": 20,      # crossed subgroups: cells with fewer patients get point estimates only
+    "verbose": True,
+}
+
+
+def _settings(settings):
+    s = dict(DEFAULT_SETTINGS)
+    s.update(settings or {})
+    if s["seed"] is None:
+        s["seed"] = BOOTSTRAP_SEED
+    if s["weighting"] not in ("eye", "patient", "optimal"):
+        raise ValueError("weighting must be 'eye', 'patient' or 'optimal'")
+    if s["subgroup_cuts"] is not None and s["subgroup_bins"] is not None:
+        raise ValueError("give subgroup_cuts or subgroup_bins, not both")
+    if s["subgroup_cuts"] is not None:
+        cuts = sorted({float(c) for c in np.atleast_1d(s["subgroup_cuts"])})
+        if not cuts or not np.all(np.isfinite(cuts)):
+            raise ValueError("subgroup_cuts must be one or more finite numbers")
+        s["subgroup_cuts"] = cuts
+    if s["subgroup_bins"] is not None:
+        if int(s["subgroup_bins"]) != s["subgroup_bins"] or int(s["subgroup_bins"]) < 2:
+            raise ValueError("subgroup_bins must be an integer of at least 2")
+        s["subgroup_bins"] = int(s["subgroup_bins"])
+    return s
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 # Tests
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------
 
 def _calculate_percentile_bootstrap_p(boot_diffs):
-    """Two-sided percentile bootstrap p-value (MedAE, or any metric when studentising is off)."""
+    """Two-sided percentile bootstrap p-value; ties (difference 0) count in both tails."""
     valid_diffs = boot_diffs[~np.isnan(boot_diffs)]
     if len(valid_diffs) == 0:
         return 1.0
-    # ties (difference exactly 0) count in both tails, as in _bootstrap_p and the percentile CI;
-    # leaving them out made p too small when medians tie (rounded errors, or identical formulas)
     tail = min(np.sum(valid_diffs >= 0), np.sum(valid_diffs <= 0))
     p = 2 * (1 + tail) / (len(valid_diffs) + 1)
     return min(p, 1.0)
 
+
 def _bootstrap_p(null_stats, obs_stat):
     """Bootstrap p-value (1 + #{null >= obs}) / (B + 1); never exactly 0 (Davison & Hinkley 1997)."""
     return (1 + np.sum(null_stats >= obs_stat)) / (len(null_stats) + 1)
+
 
 def mcnemar_test(mask1, mask2):
     """McNemar test with continuity correction (one eye per patient)."""
     b = np.sum(mask1 & ~mask2)
     c = np.sum(~mask1 & mask2)
     n = b + c
-    if b == c: return 1.0
+    if b == c:
+        return 1.0
     chi2_stat = ((abs(b - c) - 1.0) ** 2) / n
     p_val = stats.chi2.sf(chi2_stat, 1)
     return min(1.0, float(p_val))
 
+
 def clustered_mcnemar_test(mask1, mask2, cluster_ids):
     """Yang, Sun & Hardin (2010) modified Obuchowski test for bilateral (clustered) data.
 
-    Per cluster k: D_k = b_k - c_k (discordant-pair difference), n_k eyes.
-    The variance averages the centred (Obuchowski) and null-centred (D_k^2) forms:
+    D_k = b_k - c_k per patient (n_k eyes):
         X2 = ((K-1)/K) * (sum D_k)^2 / (0.5 * sum[(D_k - n_k*(p1 - p2))^2 + D_k^2])
     referred to chi-square with 1 df (no continuity correction).
     """
     d = mask1.astype(int) - mask2.astype(int)
     unique_clusters, cluster_idx = np.unique(cluster_ids, return_inverse=True)
     K = len(unique_clusters)
-    if K < 2: return 1.0
+    if K < 2:
+        return 1.0
 
     D_k = np.bincount(cluster_idx, weights=d)
     n_k = np.bincount(cluster_idx)
     sum_D = np.sum(D_k)
-    if sum_D == 0: return 1.0
+    if sum_D == 0:
+        return 1.0
 
     p_diff = sum_D / np.sum(n_k)
     denom = 0.5 * np.sum((D_k - n_k * p_diff)**2 + D_k**2)
-    if denom == 0: return 1.0
+    if denom == 0:
+        return 1.0
 
     chi2_stat = ((K - 1) / K) * sum_D**2 / denom
     return min(1.0, float(stats.chi2.sf(chi2_stat, 1)))
 
-def wild_cluster_sd_all_pairs(X, cluster_idx, K, W_g, pairs=None, chunk=500):
-    """Morgan-Pitman test of equal SDs with a wild cluster bootstrap-t, for every formula pair at once.
 
-    For each pair, the standardized difference and sum of the two prediction errors are regressed on each other;
-    the slope is tested with a wild cluster bootstrap restricted to the null (Cameron, Gelbach & Miller 2008),
-    Rademacher weights W_g (B x K) and a CR0 standard error. With weights of +/-1, every bootstrap slope and
-    standard error is a function of cluster sums, so all resamples and all pairs come from one matrix product.
-    Returns {(j, k): (p, |t_obs|, |t*|)}.
-    """
+def wild_cluster_sd_all_pairs(X, cluster_idx, K, W_g, pairs=None, chunk=500):
+    """Morgan-Pitman test of equal SDs with a wild cluster bootstrap-t, for every pair of models at once.
+
+    The standardized difference and sum of the two errors are regressed on each other and the slope tested with a
+    null-restricted wild cluster bootstrap (Cameron, Gelbach & Miller 2008; Rademacher weights W_g, B x K; CR0
+    standard error). With weights of ±1 every bootstrap statistic is a function of cluster sums, so all resamples
+    and pairs come from one matrix product. Returns {(j, k): (p, |t_obs|, |t*|)}."""
     X = np.asarray(X, float)
     n, J = X.shape
     B = W_g.shape[0]
@@ -213,14 +216,25 @@ def wild_cluster_sd_all_pairs(X, cluster_idx, K, W_g, pairs=None, chunk=500):
             out[key] = (float(_bootstrap_p(np.abs(t_s), np.abs(m["t_obs"]))), np.abs(m["t_obs"]), np.abs(t_s))
     return out
 
-def comdvar_wild_cluster(x, y, cluster_idx, K, W_g):
-    """Morgan-Pitman test of equal SDs with a wild cluster bootstrap p-value (one pair)."""
-    return wild_cluster_sd_all_pairs(np.column_stack((x, y)), cluster_idx, K, W_g)[(0, 1)]
+
+def comdvar(x, y):
+    """Morgan-Pitman test of equal SDs with HC4 standard errors (one eye per patient).
+    Adapted from Wilcox's comdvar (Rallfun v45)."""
+    diff = x - y
+    summ = x + y
+    var_x, var_y = np.var(diff, ddof=1), np.var(summ, ddof=1)
+    if var_x == 0 or var_y == 0:
+        return 1.0
+    z1 = (diff - np.mean(diff)) / np.sqrt(var_x)
+    z2 = (summ - np.mean(summ)) / np.sqrt(var_y)
+    return olshc4(z1, z2)
+
 
 def olshc4(x, y):
     """OLS slope test with HC4 standard errors. Adapted from Wilcox's olshc4 (Rallfun v45)."""
     n = len(y)
-    if n < 3: return 1.0
+    if n < 3:
+        return 1.0
 
     X = np.column_stack((np.ones(n), x))
     try:
@@ -244,22 +258,17 @@ def olshc4(x, y):
     Sigma = XtX_inv @ middle @ XtX_inv
 
     se_slope = np.sqrt(Sigma[1, 1])
-    if se_slope == 0: return 1.0
+    if se_slope == 0:
+        return 1.0
 
     t_stat = beta[1] / se_slope
     df = n - 2
     return 2 * (1 - stats.t.cdf(np.abs(t_stat), df))
 
-def comdvar(x, y):
-    """Morgan-Pitman test of equal SDs with HC4 standard errors (one eye per patient).
-    Adapted from Wilcox's comdvar (Rallfun v45)."""
-    diff = x - y
-    summ = x + y
-    var_x, var_y = np.var(diff, ddof=1), np.var(summ, ddof=1)
-    if var_x == 0 or var_y == 0: return 1.0
-    z1 = (diff - np.mean(diff)) / np.sqrt(var_x)
-    z2 = (summ - np.mean(summ)) / np.sqrt(var_y)
-    return olshc4(z1, z2)
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Patient bootstrap engines: every pair of models at once
+# ----------------------------------------------------------------------------------------------------------------------
 
 def _resample_counts(idx_chunk, K):
     """Count matrix: how often each cluster (patient or eye) appears in each resample of the block."""
@@ -268,20 +277,15 @@ def _resample_counts(idx_chunk, K):
     return np.bincount(flat, minlength=c * K).reshape(c, K).astype(np.float64)
 
 
-def all_pairs_bootstrap(X, cluster_idx, K, b_indices, use_studentized=True, pairs=None, chunk=None, ci_level=None, prop_threshold=None):
-    """Bootstrap tests for MPE, MAE, RMSE and MedAE for every formula pair at once.
+def all_pairs_bootstrap(X, cluster_idx, K, b_indices, pairs=None, chunk=None, ci_level=None, prop_threshold=None):
+    """Patient bootstrap tests of the mean error (MPE), MAE, RMSE and median absolute error (MedAE) for every pair of
+    models. X: n x J prediction errors. Bootstrap-t with a CR1 standard error (RMSE tested on the MSE); MedAE by
+    percentile bootstrap. Each block of resamples is a count matrix W (resamples x patients), so every bootstrap sum
+    is one product W @ V, and each model's bootstrap median comes from running totals of W over its sorted errors.
 
-    X is an n x J matrix of prediction errors (one column per formula). Returns {(j, k): result} for j < k,
-    each result having the same keys as perform_advanced_bootstrap. Resamples, statistics and p-value rules are
-    the same as a pair-by-pair calculation; only the arithmetic is organized differently. Each block of resamples becomes a count matrix W (resamples x clusters), so every
-    bootstrap sum the bootstrap-t needs is one matrix product W @ V, and each formula's bootstrap median is read
-    from running totals of W over that formula's sorted errors (one median per formula, not per pair).
-
-    If ci_level is given (e.g. 0.95), each result also holds confidence intervals for the difference between the two
-    formulas, from the same resamples: bootstrap-t for MPE and MAE (as their tests), percentile for RMSE, MedAE, SD and,
-    when prop_threshold is given, the proportion of eyes with |PE| <= prop_threshold. They are not adjusted for
-    multiple comparisons, and the p-values are unaffected. Each result also holds the observed difference and its
-    scale (RW_*_diff, RW_*_scale), from which adjust_pvalues builds the adjusted (simultaneous) intervals.
+    With ci_level, also the CIs of each difference from the same resamples: bootstrap-t for MPE and MAE, percentile
+    for RMSE, MedAE, SD and (with prop_threshold) the proportion of eyes with |error| <= prop_threshold. RW_* hold
+    the Romano-Wolf statistics. Returns {(j, k): result}.
     """
     X = np.asarray(X, float)
     n, J = X.shape
@@ -290,13 +294,13 @@ def all_pairs_bootstrap(X, cluster_idx, K, b_indices, use_studentized=True, pair
     N_g = np.bincount(cluster_idx, minlength=K).astype(float)
     N_tot = N_g.sum()
 
-    # per-cluster sums for each formula and each family (abs error, squared error, signed error)
+    # per-patient sums for each model: absolute, squared and signed error
     fam = {"MAE": np.abs(X), "MSE": X ** 2, "MPE": X}
     S = {f: np.stack([np.bincount(cluster_idx, weights=v[:, j], minlength=K) for j in range(J)], axis=1) for f, v in fam.items()}
-    means = {f: S[f].sum(0) / N_tot for f in fam}                      # observed per-formula means
-    C = {f: S[f] - np.outer(N_g, means[f]) for f in fam}               # centred per-cluster sums (better precision)
+    means = {f: S[f].sum(0) / N_tot for f in fam}
+    C = {f: S[f] - np.outer(N_g, means[f]) for f in fam}               # centered sums (precision)
 
-    # columns of V: for each family, centred sums (J), and cross-products for every pair incl. squares
+    # columns of V: centered sums and their cross-products, for each family
     tri = [(a, b) for a in range(J) for b in range(a, J)]
     cols, index = [N_g], {}
     for f in fam:
@@ -314,17 +318,15 @@ def all_pairs_bootstrap(X, cluster_idx, K, b_indices, use_studentized=True, pair
     V = np.column_stack(cols)
     tpos = {t: i for i, t in enumerate(tri)}
 
-    # observed statistics, computed exactly as the original engine does
     def cr1_se(Svec, mean_val):
         res = Svec - mean_val * N_g
         return np.sqrt(max(0.0, (K / (K - 1)) * np.sum(res ** 2) / N_tot ** 2)) if K > 1 else 0.0
 
-    # medians: one per formula per resample, read from running totals of the counts over each formula's sorted values
+    # medians: one per model per resample, from running totals of the counts over each model's sorted values
     absX = np.abs(X)
     order = [np.argsort(absX[:, j], kind="stable") for j in range(J)]
     sorted_vals = [absX[order[j], j] for j in range(J)]
     eye_cluster = [cluster_idx[order[j]] for j in range(J)]
-    max_c = int(N_g.max())
 
     # A resample's median almost always lies close to the middle of the original sorted errors, so the running
     # totals are only needed over a window of sorted positions around the middle (+/- 5 sqrt(n) + 16 eyes): the eyes
@@ -404,35 +406,20 @@ def all_pairs_bootstrap(X, cluster_idx, K, b_indices, use_studentized=True, pair
             ssq = sdd - 2 * m * sdn + m ** 2 * snn                                   # sum_g w (S'_g - m N_g)^2
             var = (K / (K - 1)) * np.maximum(ssq, 0) / bN ** 2 if K > 1 else np.zeros(B)
             se = np.sqrt(var)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t_star = np.where(se > 0, m / se, 0.0)
             if ci_level:
                 if key == "RMSE":                                                    # percentile, on the RMSE scale
                     q = index[("MSE", "raw")]
                     r[f"CI_{key}"] = qci(np.sqrt(np.maximum(0, sums[:, q + j] / bN)) - np.sqrt(np.maximum(0, sums[:, q + k] / bN)))
-                elif use_studentized:                                                # bootstrap-t
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        ts = np.where(se > 0, m / se, 0.0)
-                    lo_q, hi_q = qci(ts)
+                else:                                                                # bootstrap-t
+                    lo_q, hi_q = qci(t_star)
                     r[f"CI_{key}"] = (d_mean_obs - hi_q * se_obs, d_mean_obs - lo_q * se_obs)
-                else:
-                    r[f"CI_{key}"] = qci(m + d_mean_obs)
-            if use_studentized:
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    t_star = np.where(se > 0, m / se, 0.0)
-                r[f"P_{key}"] = _bootstrap_p(np.abs(t_star), np.abs(t_obs))
-                r[f"RW_{key}_obs"] = np.abs(t_obs); r[f"RW_{key}_null"] = np.abs(t_star)
-                # RMSE is tested on the MSE scale, so its statistic gives no interval for the RMSE difference
-                r[f"RW_{key}_diff"] = np.nan if key == "RMSE" else d_mean_obs
-                r[f"RW_{key}_scale"] = np.nan if key == "RMSE" else se_obs
-            else:
-                if key == "RMSE":
-                    q = index[("MSE", "raw")]
-                    boot = np.sqrt(np.maximum(0, sums[:, q + j] / bN)) - np.sqrt(np.maximum(0, sums[:, q + k] / bN))
-                    obs = np.sqrt(means["MSE"][j]) - np.sqrt(means["MSE"][k])
-                else:
-                    boot, obs = m + d_mean_obs, d_mean_obs
-                r[f"P_{key}"] = _calculate_percentile_bootstrap_p(boot)
-                r[f"RW_{key}_obs"] = abs(obs); r[f"RW_{key}_null"] = np.abs(boot - obs)
-                r[f"RW_{key}_diff"] = obs; r[f"RW_{key}_scale"] = 1.0
+            r[f"P_{key}"] = _bootstrap_p(np.abs(t_star), np.abs(t_obs))
+            r[f"RW_{key}_obs"] = np.abs(t_obs); r[f"RW_{key}_null"] = np.abs(t_star)
+            # RMSE is tested on the MSE scale, so its statistic gives no interval for the RMSE difference
+            r[f"RW_{key}_diff"] = np.nan if key == "RMSE" else d_mean_obs
+            r[f"RW_{key}_scale"] = np.nan if key == "RMSE" else se_obs
         boot_medae = med[:, j] - med[:, k]
         obs_medae = np.median(absX[:, j]) - np.median(absX[:, k])
         r["P_MedAE"] = _calculate_percentile_bootstrap_p(boot_medae)
@@ -446,697 +433,22 @@ def all_pairs_bootstrap(X, cluster_idx, K, b_indices, use_studentized=True, pair
             if prop_threshold is not None:
                 pc = index["PROP"]
                 r["CI_PROP"] = qci((sums[:, pc + j] - sums[:, pc + k]) / bN)
-        if use_studentized:
-            se_m = max(np.std(boot_medae, ddof=1), 1e-6)
-            r["RW_MedAE_obs"] = abs(obs_medae) / se_m; r["RW_MedAE_null"] = np.abs(boot_medae - obs_medae) / se_m
-            r["RW_MedAE_scale"] = se_m
-        else:
-            r["RW_MedAE_obs"] = abs(obs_medae); r["RW_MedAE_null"] = np.abs(boot_medae - obs_medae)
-            r["RW_MedAE_scale"] = 1.0
+        se_m = max(np.std(boot_medae, ddof=1), 1e-6)
+        r["RW_MedAE_obs"] = abs(obs_medae) / se_m; r["RW_MedAE_null"] = np.abs(boot_medae - obs_medae) / se_m
+        r["RW_MedAE_scale"] = se_m
         r["RW_MedAE_diff"] = obs_medae
         out[(j, k)] = r
     return out
 
 
-def perform_advanced_bootstrap(e1, e2, cluster_idx, K, b_indices, W_g=None, use_studentized=True):
-    """Patient (cluster) bootstrap for MPE, MAE, RMSE and MedAE for one formula pair.
-
-    MPE, MAE and RMSE use the bootstrap-t with a CR1 standard error (RMSE is tested through the MSE);
-    MedAE uses the percentile bootstrap. Also returns the statistics the Romano-Wolf correction needs.
-    """
-    return all_pairs_bootstrap(np.column_stack((e1, e2)), cluster_idx, K, b_indices, use_studentized=use_studentized)[(0, 1)]
-
-
-
-def yuen_t_test(x, y, tr=0):
-    """Yuen's paired test on trimmed means (optional, off by default)."""
-    x, y = np.array(x), np.array(y)
-    d = x - y
-    n = len(d)
-
-    g = int(tr * n)
-    d_sort = np.sort(d)
-    d_win = d_sort.copy()
-    if g > 0:
-        d_win[:g] = d_win[g]
-        d_win[-g:] = d_win[-g-1]
-
-    win_var = np.var(d_win, ddof=1)
-    h = n - 2 * g
-    se_tr = np.sqrt((n - 1) * win_var / (h * (h - 1)))
-
-    trimmed_mean_diff = np.mean(d_sort[g:-g]) if g > 0 else np.mean(d)
-    t_stat = trimmed_mean_diff / se_tr if se_tr != 0 else 0
-    return 2 * (1 - stats.t.cdf(np.abs(t_stat), h - 1)), trimmed_mean_diff
-
-def romano_wolf_correction(obs_stats, boot_null_stats):
-    """Romano-Wolf step-down adjusted p-values from the bootstrap null distributions of |t|."""
-    M = len(obs_stats)
-    if M == 0: return np.array([])
-
-    adj_p = np.zeros(M)
-    order = np.argsort(obs_stats)[::-1]
-    sorted_nulls = boot_null_stats[:, order]
-
-    max_nulls = np.maximum.accumulate(sorted_nulls[:, ::-1], axis=1)[:, ::-1]
-
-    for i in range(M):
-        p_val = _bootstrap_p(max_nulls[:, i], obs_stats[order[i]])
-        adj_p[order[i]] = p_val
-
-    for i in range(1, M):
-        adj_p[order[i]] = max(adj_p[order[i]], adj_p[order[i-1]])
-
-    return adj_p
-
-# ------------------------------------------------------------------------------
-# Analysis
-# ------------------------------------------------------------------------------
-
-
-def adjusted_ci_critical(boot_null_stats, level, method, n_reject=None):
-    """Critical value for each comparison's adjusted interval (difference +/- c * scale), matching the method chosen
-    for the adjusted p-values. boot_null_stats is B x M (bootstrap |t| per comparison, as for Romano-Wolf).
-
-    romano_wolf     one c for all: level-quantile of the largest |t| across comparisons (single-step max-|t|)
-    bonferroni      each comparison's own 1 - (1 - level)/M quantile of |t| (agrees with Bonferroni p-values)
-    holm, hommel    Bonferroni intervals: these stepwise methods have no compatible finite intervals
-    fdr_bh          Benjamini-Yekutieli false-coverage-rate intervals at level 1 - R(1 - level)/M, R = number of
-                    comparisons with adjusted p <= 1 - level (R = 0 gives the Bonferroni level)
-    Returns an array of M critical values, or None for any other method (no adjusted interval).
-    """
-    N = np.asarray(boot_null_stats, float)
-    M, alpha = N.shape[1], 1 - level
-    if method == 'romano_wolf':
-        return np.full(M, np.quantile(N.max(axis=1), level))
-    if method in ('bonferroni', 'holm', 'hommel'):
-        q = 1 - alpha / M
-    elif method == 'fdr_bh':
-        q = 1 - max(int(n_reject or 0), 1) * alpha / M
-    else:
-        return None
-    return np.quantile(N, q, axis=0)
-
-
-def adjusted_ci_description(method, level):
-    """One-line description of the adjusted intervals for the methodology sheet."""
-    L = f"{level * 100:g}%"
-    if method == 'romano_wolf':
-        return (f"{L} simultaneous intervals: difference \u00b1 c \u00d7 SE, c = {L} quantile of the largest bootstrap |t| across "
-                "comparisons (single-step max-|t|, the interval counterpart of Romano-Wolf)")
-    if method == 'bonferroni':
-        return (f"{L} Bonferroni intervals: difference \u00b1 c \u00d7 SE, c = 1 - {1 - level:g}/m quantile of each comparison's "
-                "bootstrap |t| (m comparisons); they agree with the Bonferroni-adjusted p-values")
-    if method in ('holm', 'hommel'):
-        return (f"{L} Bonferroni intervals (c = 1 - {1 - level:g}/m quantile of each comparison's bootstrap |t|): "
-                f"{method.capitalize()} has no compatible finite intervals, so these are conservative and an interval can "
-                "include 0 next to a significant adjusted p-value")
-    if method == 'fdr_bh':
-        return (f"Benjamini-Yekutieli false-coverage-rate intervals at level 1 - R \u00d7 {1 - level:g}/m (R = comparisons "
-                f"with adjusted p \u2264 {1 - level:g}); they control the false coverage rate among the significant "
-                "comparisons, not simultaneous coverage")
-    return "None: adjusted intervals are given for Romano-Wolf, Bonferroni, Holm, Hommel and Benjamini-Hochberg only"
-
-def run_biometry_analysis(df_input, group_name="All", settings=None):
-    settings = settings or {}
-    fwer_method = settings.get('fwer_method', MULTIPLE_TEST_METHOD)
-    bs_iterations = settings.get('bootstrap_iterations', BOOTSTRAP_ITERATIONS)
-    invalid_threshold = settings.get('invalid_threshold', INVALID_THRESHOLD)
-    mcnemar_threshold = settings.get('mcnemar_threshold', MCNEMAR_THRESHOLD)
-    report_ci = settings.get('report_ci', REPORT_CI)
-    ci_level = float(settings.get('ci_level', CI_LEVEL)) if report_ci else None
-
-    numeric_df = df_input.select_dtypes(include=[np.number])
-    formulas = []
-
-    patient_id_variants = ['patient_id', 'id_patient', 'patientid', 'pt_id', 'id', 'hosp_id', 'hospid', 'ptid']
-
-    # biometry columns that are not prediction errors
-    ignore_variants = ['axl', 'al', 'acd', 'acdepth', 'k1', 'k2', 'meank', 'age', 'gender', 'gender_num',
-                       'eye', 'side', 'lt', 'lensthickness', 'cct', 'wtw', 'hcd', 'iol_implanted',
-                       'postoperative_refraction', 'corneal_refractive_index']
-
-    patient_col = None
-    for c in df_input.columns:
-        c_lower = str(c).lower()
-        if c_lower in patient_id_variants:
-            patient_col = c
-            continue
-
-        # skip metadata, predicted refraction and lens-constant columns
-        if c_lower in ignore_variants or c_lower.startswith('predict_') or c_lower.endswith('_const'):
-            continue
-
-        if c in numeric_df.columns:
-            formulas.append(c)
-
-    if len(formulas) < 2: return pd.DataFrame(), {}, {}
-
-    valid_mask = pd.Series(True, index=numeric_df.index)
-    for f in formulas:
-        valid_mask &= ~np.isnan(numeric_df[f])
-        valid_mask &= np.abs(numeric_df[f]) <= invalid_threshold
-
-    if patient_col:
-        valid_mask &= df_input[patient_col].notna()
-        if ENFORCE_INDEPENDENCE:
-            rng_indep = np.random.default_rng(BOOTSTRAP_SEED)
-            valid_patients = df_input.loc[valid_mask, patient_col]
-            shuffled_idx = rng_indep.permutation(valid_patients.index)
-            selected_idx = valid_patients.loc[shuffled_idx].drop_duplicates().index
-            new_mask = pd.Series(False, index=numeric_df.index)
-            new_mask.loc[selected_idx] = True
-            valid_mask &= new_mask
-            print(f"[{group_name}] ENFORCE_INDEPENDENCE Active: Dropped to 1 eye per patient. Analyzing {len(selected_idx)} independent rows.")
-        else: print(f"[{group_name}] Cluster Bootstrap Active: Resampling by '{patient_col}'.")
-    else: print(f"[{group_name}] Standard Bootstrap Active: Resampling independently.")
-
-    valid_df = numeric_df[valid_mask]
-    n_global = len(valid_df)
-
-    min_group_size = max(2, int(settings.get('min_group_size', MIN_GROUP_SIZE)))
-    if n_global < min_group_size:
-        print(f"[{group_name}] Not tested: {n_global} valid eye(s), fewer than the minimum of {min_group_size}.")
-        return pd.DataFrame(), {}, {}
-
-    rng = np.random.default_rng(BOOTSTRAP_SEED)
-
-    # IDs as strings so that mixed types sort
-    cluster_ids = df_input.loc[valid_mask, patient_col].astype(str).values if patient_col else np.arange(n_global)
-    unique_clusters, cluster_idx = np.unique(cluster_ids, return_inverse=True)
-    K = len(unique_clusters)
-    has_clusters = K < n_global
-
-    # resample indices and wild-bootstrap weights, generated in blocks and stored compactly (int32 / int8);
-    # the values are identical to drawing them in one call
-    global_b_indices = np.empty((bs_iterations, K), dtype=np.int32)
-    for i in range(0, bs_iterations, 500):
-        global_b_indices[i:i + 500] = rng.choice(K, size=(min(500, bs_iterations - i), K), replace=True)
-    global_W_g = np.empty((bs_iterations, K), dtype=np.int8)
-    for i in range(0, bs_iterations, 500):
-        global_W_g[i:i + 500] = rng.choice([-1, 1], size=(min(500, bs_iterations - i), K))
-
-    needs_bootstrap_nulls = fwer_method == 'romano_wolf'
-    needs_wcb = RUN_SD_TEST and (has_clusters or needs_bootstrap_nulls)
-
-    pairs = list(combinations(formulas, 2))
-
-    bs_type = "Studentized (CR1)" if (USE_STUDENTIZED_BS and has_clusters) else "Studentized" if USE_STUDENTIZED_BS else "Percentile"
-    print(f"[{group_name}] Processing {len(pairs)} comparisons ({bs_type}, N={n_global}, Iterations={bs_iterations})...")
-
-    # bootstrap tests for every formula pair at once (matrix form; identical to pair-by-pair results)
-    f_index = {f: i for i, f in enumerate(formulas)}
-    boot_all = all_pairs_bootstrap(valid_df[formulas].values, cluster_idx, K, global_b_indices, use_studentized=USE_STUDENTIZED_BS,
-                                   ci_level=ci_level, prop_threshold=mcnemar_threshold)
-    sd_all = wild_cluster_sd_all_pairs(valid_df[formulas].values, cluster_idx, K, global_W_g) if (RUN_SD_TEST and needs_wcb) else None
-
-    # remaining per-pair tests (SD, McNemar) run in threads
-    def process_pair_task(pair):
-        f1, f2 = pair
-        e1, e2 = valid_df[f1].values, valid_df[f2].values
-
-        boot_res = boot_all[(f_index[f1], f_index[f2])]
-
-        if RUN_SD_TEST:
-            if needs_wcb: p_sd, obs_sd, null_sd = sd_all[(f_index[f1], f_index[f2])]
-            else: p_sd = comdvar(e1, e2); obs_sd = 0.0; null_sd = np.zeros(bs_iterations)
-        else: p_sd = np.nan; obs_sd = 0.0; null_sd = np.zeros(bs_iterations)
-
-        mask1, mask2 = np.abs(e1) <= mcnemar_threshold, np.abs(e2) <= mcnemar_threshold
-        if has_clusters: p_mcnemar = clustered_mcnemar_test(mask1, mask2, cluster_ids)
-        else: p_mcnemar = mcnemar_test(mask1, mask2)
-
-        if RUN_YUEN_TEST:
-            _, diff_mae = yuen_t_test(np.abs(e1), np.abs(e2), tr=0)
-            yuen_mae_p, trim_mae_diff = yuen_t_test(np.abs(e1), np.abs(e2), tr=YUEN_TRIM_PROPORTION)
-            yuen_rmse_p, trim_sq_diff = yuen_t_test(e1**2, e2**2, tr=YUEN_TRIM_PROPORTION)
-        else:
-            diff_mae = np.mean(np.abs(e1)) - np.mean(np.abs(e2))
-
-        row = {
-            'Group': group_name, 'Formula A': f1, 'Formula B': f2, 'N': n_global,
-            'MPE Diff': np.mean(e1) - np.mean(e2), 'Boot (MPE) p': boot_res['P_MPE'],
-            'MAE Diff': diff_mae, 'Boot (MAE) p': boot_res['P_MAE'],
-            'MedAE Diff': np.median(np.abs(e1)) - np.median(np.abs(e2)), 'Boot (MedAE) p': boot_res['P_MedAE'],
-            'RMSE Diff': np.sqrt(np.mean(e1**2)) - np.sqrt(np.mean(e2**2)), 'Boot (RMSE) p': boot_res['P_RMSE'],
-            'SD Diff': np.std(e1, ddof=1) - np.std(e2, ddof=1),
-            'Morgan-Pitman (SD) p': p_sd,
-            'McNemar Diff': np.mean(mask1) - np.mean(mask2),
-            'McNemar p': p_mcnemar
-        }
-        if ci_level:
-            # confidence interval columns straight after each difference
-            lbl = f"{ci_level * 100:g}% CI"
-            ci_key = {'MPE Diff': 'CI_MPE', 'MAE Diff': 'CI_MAE', 'MedAE Diff': 'CI_MedAE', 'RMSE Diff': 'CI_RMSE',
-                      'SD Diff': 'CI_SD', 'McNemar Diff': 'CI_PROP'}
-            new_row = {}
-            for col, val in row.items():
-                new_row[col] = val
-                if col in ci_key and ci_key[col] in boot_res:
-                    new_row[f'{col} {lbl} low'], new_row[f'{col} {lbl} high'] = boot_res[ci_key[col]]
-            row = new_row
-        if RUN_YUEN_TEST:
-            row['Trimmed MAE Diff'] = trim_mae_diff; row['Yuen (MAE) p'] = yuen_mae_p; row['Yuen (RMSE) p'] = yuen_rmse_p
-
-        return {
-            'row': row,
-            'rw_mpe_obs': boot_res['RW_MPE_obs'], 'rw_mpe_null': boot_res['RW_MPE_null'],
-            'rw_mae_obs': boot_res['RW_MAE_obs'], 'rw_mae_null': boot_res['RW_MAE_null'],
-            'rw_rmse_obs': boot_res['RW_RMSE_obs'], 'rw_rmse_null': boot_res['RW_RMSE_null'],
-            'rw_medae_obs': boot_res['RW_MedAE_obs'], 'rw_medae_null': boot_res['RW_MedAE_null'],
-            **{f'rw_{m.lower()}_{part}': boot_res[f'RW_{m}_{part}'] for m in ['MPE', 'MAE', 'RMSE', 'MedAE'] for part in ('diff', 'scale')},
-            'sd_obs': obs_sd, 'sd_null': null_sd
-        }
-
-    results = []
-    rw_stats = {m: {'obs': [], 'null': [], 'diff': [], 'scale': []} for m in ['MPE', 'MAE', 'RMSE', 'MedAE', 'SD']}
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        for res in executor.map(process_pair_task, pairs):
-            results.append(res['row'])
-            for m in ['MPE', 'MAE', 'RMSE', 'MedAE']:
-                for part in ('obs', 'null', 'diff', 'scale'):
-                    rw_stats[m][part].append(res[f'rw_{m.lower()}_{part}'])
-            rw_stats['SD']['obs'].append(res['sd_obs'])
-            rw_stats['SD']['null'].append(res['sd_null'])
-
-    methodology = {
-        'Dependence Strategy': f"Bilateral Clustering (n={bs_iterations} Resamples)" if has_clusters else "Independent Eyes",
-        'Precision Test (SD)': "Morgan-Pitman (Wild Cluster Bootstrap)" if needs_wcb else "Morgan-Pitman (HC4 Asymptotic)",
-        'Accuracy Test (McNemar)': "Yang's Mod. Obuchowski (Cluster-Robust)" if has_clusters else "Asymptotic McNemar",
-        'MPE Test': "Studentized Cluster Bootstrap (CR1)" if (USE_STUDENTIZED_BS and has_clusters) else "Studentized Bootstrap" if USE_STUDENTIZED_BS else "Percentile Bootstrap",
-        'MAE Test': "Studentized Cluster Bootstrap (CR1)" if (USE_STUDENTIZED_BS and has_clusters) else "Studentized Bootstrap" if USE_STUDENTIZED_BS else "Percentile Bootstrap",
-        'MedAE Test': "Cluster Percentile Bootstrap" if has_clusters else "Percentile Bootstrap",
-        'RMSE Test': "Studentized Cluster Bootstrap on MSE (CR1)" if (USE_STUDENTIZED_BS and has_clusters) else "Studentized Bootstrap" if USE_STUDENTIZED_BS else "Percentile Bootstrap",
-    }
-    if ci_level:
-        methodology['Confidence Intervals'] = (f"{ci_level * 100:g}% bootstrap intervals for each difference: bootstrap-t (MPE, MAE), "
-                                               "percentile (RMSE, MedAE, SD, proportion); not adjusted for multiple comparisons")
-        methodology['Adjusted Confidence Intervals'] = (
-            ("Columns 'CI adj', for MPE, MAE and MedAE, adjusted for all comparisons in the group as the p-values are: "
-             + adjusted_ci_description(fwer_method, ci_level)
-             + ". RMSE is tested on the MSE scale, so it has none under the bootstrap-t")
-            if fwer_method in ('romano_wolf', 'bonferroni', 'holm', 'hommel', 'fdr_bh')
-            else adjusted_ci_description(fwer_method, ci_level))
-
-    df_results = pd.DataFrame(results)
-    # eyes and patients actually tested in this group (used to label figures)
-    df_results.attrs['group_info'] = {'n_eyes': int(n_global), 'n_patients': int(K), 'clustered': bool(has_clusters),
-                                      'patient_column': patient_col}
-    return df_results, rw_stats, methodology
-
-def adjust_pvalues(df_results, rw_stats=None, method='hommel'):
-    """Add adjusted p-value columns.
-
-    Romano-Wolf is used where bootstrap null distributions exist; other columns use
-    FALLBACK_TEST_METHOD (Hommel by default).
-    """
-    if df_results.empty: return df_results
-
-    rw_metric_mapping = {
-        'Boot (MPE) p': 'MPE', 'Boot (MAE) p': 'MAE',
-        'Boot (MedAE) p': 'MedAE', 'Boot (RMSE) p': 'RMSE',
-        'Morgan-Pitman (SD) p': 'SD'
-    }
-
-    p_cols = [c for c in df_results.columns if ' p' in c and 'adj' not in c]
-
-    for col in p_cols:
-        pvals = df_results[col].values
-        pvals_adj = np.full(len(pvals), np.nan)
-        mask = ~np.isnan(pvals)
-
-        # a single comparison needs no adjustment
-        if np.sum(mask) <= 1:
-            pvals_adj[mask] = pvals[mask]
-            use_fallback = False
-        else:
-            use_fallback = True
-
-        # Romano-Wolf
-        if method == 'romano_wolf' and col in rw_metric_mapping and rw_stats is not None and use_fallback:
-            metric = rw_metric_mapping[col]
-            obs = np.array(rw_stats[metric]['obs'])
-            null_list = rw_stats[metric]['null']
-
-            if len(obs) > 1 and len(null_list) > 0:
-                null_matrix = np.column_stack(null_list)
-                if np.sum(np.abs(null_matrix)) > 0:
-                    pvals_adj_rw = romano_wolf_correction(obs, null_matrix)
-                    pvals_adj[mask] = pvals_adj_rw[mask]
-                    use_fallback = False
-
-        # otherwise Hommel, Holm, etc.
-        if use_fallback:
-            current_method = FALLBACK_TEST_METHOD if method == 'romano_wolf' else method
-            if np.sum(mask) > 0:
-                _, adj, _, _ = multipletests(pvals[mask], method=current_method)
-                pvals_adj[mask] = adj
-
-        # an adjusted p-value is never smaller than the raw one
-        if np.sum(mask) > 0:
-            pvals_adj[mask] = np.maximum(pvals_adj[mask], pvals[mask])
-
-        try:
-            idx = df_results.columns.get_loc(col) + 1
-            new_col_name = col.replace(' p', ' p_adj')
-            if new_col_name in df_results.columns:
-                  df_results[new_col_name] = pvals_adj
-            else:
-                df_results.insert(idx, new_col_name, pvals_adj)
-        except Exception:
-            pass
-
-    return add_adjusted_cis(df_results, rw_stats, method=method)
-
-
-def add_adjusted_cis(df_results, rw_stats=None, metrics=('MPE', 'MAE', 'MedAE', 'RMSE'), method='romano_wolf'):
-    """Add adjusted ('CI adj') intervals next to each unadjusted confidence interval (MPE, MAE, MedAE; RMSE too under
-    the percentile bootstrap), matching the multiple-comparison method (see adjusted_ci_critical). Needs report_ci;
-    with a single comparison the adjusted interval is the unadjusted one."""
-    if df_results.empty or method not in ('romano_wolf', 'bonferroni', 'holm', 'hommel', 'fdr_bh'): return df_results
-    for metric in metrics:
-        dcol = f'{metric} Diff'
-        lows = [c for c in df_results.columns if c.startswith(f'{dcol} ') and c.endswith('% CI low') and 'adj' not in c]
-        if not lows: continue
-        lbl = lows[0][len(dcol) + 1:-len(' low')]                       # e.g. '95% CI'
-        level = float(lbl.split('%')[0]) / 100
-        low_col, high_col = f'{dcol} {lbl} low', f'{dcol} {lbl} high'
-        if len(df_results) == 1:
-            adj_lo, adj_hi = df_results[low_col].values.astype(float), df_results[high_col].values.astype(float)
-        else:
-            st = (rw_stats or {}).get(metric, {})
-            diffs, scales = np.array(st.get('diff', []), float), np.array(st.get('scale', []), float)
-            if len(diffs) != len(df_results) or not (np.isfinite(diffs).all() and np.isfinite(scales).all()):
-                continue                                                # no statistic to adjust with (e.g. RMSE, bootstrap-t)
-            pcol = f'Boot ({metric}) p_adj'
-            n_rej = int(np.sum(df_results[pcol].values <= 1 - level + 1e-12)) if pcol in df_results.columns else None
-            c = adjusted_ci_critical(np.column_stack(st['null']), level, method, n_rej)
-            adj_lo, adj_hi = diffs - c * scales, diffs + c * scales
-        idx = df_results.columns.get_loc(high_col) + 1
-        for name, vals in ((f'{dcol} {lbl} adj low', adj_lo), (f'{dcol} {lbl} adj high', adj_hi)):
-            if name in df_results.columns: df_results[name] = vals
-            else: df_results.insert(idx, name, vals); idx += 1
-    return df_results
-
-def analyze_prediction_errors(df_input, axl_data=None, settings=None):
-    settings = settings or {}
-    fwer_method = settings.get('fwer_method', MULTIPLE_TEST_METHOD)
-    axl_short = settings.get('axl_short', AXL_SHORT_CUTOFF)
-    axl_long = settings.get('axl_long', AXL_LONG_CUTOFF)
-
-    def _process_group(df_sub, name):
-        if df_sub.empty: return None
-        res_df, rw_stats, methodology = run_biometry_analysis(
-            df_sub,
-            group_name=name,
-            settings=settings
-        )
-        if res_df.empty: return None
-        info = dict(res_df.attrs.get('group_info', {}), methodology=methodology)
-        res_df = adjust_pvalues(res_df, rw_stats=rw_stats, method=fwer_method)
-        return res_df, info
-
-    groups = [("All", df_input)]
-
-    if axl_data is not None:
-        if isinstance(df_input, pd.DataFrame) and hasattr(axl_data, 'index'):
-            common_idx = df_input.index.intersection(axl_data.index)
-            df_aligned = df_input.loc[common_idx]
-            axl_aligned = axl_data.loc[common_idx].iloc[:, 0] if isinstance(axl_data, pd.DataFrame) else axl_data.loc[common_idx]
-        else:
-            df_aligned, axl_aligned = df_input, axl_data
-
-        axl_vals = np.array(axl_aligned)
-
-        mask_short = axl_vals <= axl_short
-        mask_long = axl_vals >= axl_long
-        mask_medium = (axl_vals > axl_short) & (axl_vals < axl_long)
-
-        if np.sum(mask_short) > 0:
-            groups.append(("Short", df_aligned.iloc[mask_short]))
-
-        if np.sum(mask_medium) > 0:
-            groups.append(("Medium", df_aligned.iloc[mask_medium]))
-
-        if np.sum(mask_long) > 0:
-            groups.append(("Long", df_aligned.iloc[mask_long]))
-
-    # The groups are independent (each draws its own resamples from BOOTSTRAP_SEED), so they run side by side;
-    # results are collected in the order above, identical to running them one after another.
-    print(f"--- Running Analysis: {', '.join(name for name, _ in groups)} ---")
-    if RUN_GROUPS_IN_PARALLEL and len(groups) > 1:
-        with ThreadPoolExecutor(max_workers=len(groups)) as executor:
-            outcomes = list(executor.map(lambda g: _process_group(g[1], g[0]), groups))
-    else:
-        outcomes = [_process_group(df_sub, name) for name, df_sub in groups]
-
-    all_results_frames, group_info = [], {}
-    for (name, _), outcome in zip(groups, outcomes):
-        if outcome is not None:
-            all_results_frames.append(outcome[0])
-            group_info[name] = outcome[1]
-
-    if not all_results_frames: return pd.DataFrame()
-
-    final_df = pd.concat(all_results_frames, ignore_index=True)
-
-    # The methods table describes the first group tested (All eyes); where a subgroup used a different method
-    # (e.g. it has no bilateral pairs), that is added to the entry.
-    base_name = next(iter(group_info))
-    global_methodology = dict(group_info[base_name]['methodology'])
-    for name, info in group_info.items():
-        if name == base_name: continue
-        for k, v in info['methodology'].items():
-            if k not in global_methodology:
-                global_methodology[k] = f"{name} eyes: {v}"
-            elif v != group_info[base_name]['methodology'].get(k):
-                global_methodology[k] += f"; {name} eyes: {v}"
-
-    # describe the multiplicity correction in the methodology table
-    if global_methodology:
-        if fwer_method == 'romano_wolf': fwer_name = 'Romano-Wolf'
-        elif fwer_method == 'fdr_bh': fwer_name = 'FDR-BH'
-        else: fwer_name = fwer_method.capitalize()
-
-        if fwer_method == 'romano_wolf':
-            global_methodology['FWER Correction'] = f"{fwer_name} (Bootstrapped Tests) / Hommel (Asymptotic Fallback)"
-        else:
-            global_methodology['FWER Correction'] = fwer_name
-
-        # put the thresholds into the labels
-        mc_t = float(settings.get('mcnemar_threshold', MCNEMAR_THRESHOLD))
-        inv_t = float(settings.get('invalid_threshold', INVALID_THRESHOLD))
-        labelled = {}
-        for k, v in global_methodology.items():
-            if k == 'Accuracy Test (McNemar)':
-                labelled[f'Accuracy Test (McNemar, |PE| ≤ {mc_t:.2f} D)'] = f"{v} – proportion of eyes with |PE| ≤ {mc_t:.2f} D"
-            else:
-                labelled[k] = v
-        labelled['Invalid PE Exclusion'] = f"Eyes with |PE| > {inv_t:.2f} D excluded from the pairwise dependence tests"
-        global_methodology = labelled
-
-        summary_data = [
-            {'Test Category': k, 'Methodology Applied': v}
-            for k, v in global_methodology.items()
-        ]
-        # kept as a list of dicts (a DataFrame in attrs breaks pd.concat)
-        final_df.attrs['methodology_summary'] = summary_data
-    final_df.attrs['mcnemar_threshold'] = float(settings.get('mcnemar_threshold', MCNEMAR_THRESHOLD))
-    # per group: eyes and patients tested, whether bilateral clustering was used, and the tests applied
-    final_df.attrs['group_info'] = group_info
-    final_df.attrs['fwer_method'] = fwer_method
-
-    return final_df
-
-# ------------------------------------------------------------------------------
-# Excel output
-# ------------------------------------------------------------------------------
-def _set_column_widths(writer, sheet_name, widths):
-    """Column widths for an openpyxl or an xlsxwriter ExcelWriter sheet."""
-    try:
-        ws = writer.sheets[sheet_name]
-        if hasattr(ws, 'set_column'):                                   # xlsxwriter
-            for idx, w in enumerate(widths):
-                ws.set_column(idx, idx, w)
-        else:                                                           # openpyxl
-            from openpyxl.utils import get_column_letter
-            for idx, w in enumerate(widths, 1):
-                ws.column_dimensions[get_column_letter(idx)].width = w
-    except (ImportError, AttributeError, KeyError):
-        pass
-
-def write_advanced_stats_to_excel(df_results, writer, sheet_name='Advanced_Stats'):
-    """Write the results to an Excel sheet and the tests used to a 'Statistical Tests' sheet."""
-    if df_results.empty:
-        print("Warning: DataFrame is empty. Nothing to write.")
-        return
-
-    cols_to_drop = ['Precision Test (SD)', 'Accuracy Test (McNemar)', 'MAE Test', 'Dependence Strategy', 'FWER Correction']
-    df_clean = df_results.drop(columns=[c for c in cols_to_drop if c in df_results.columns], errors='ignore')
-
-    # e.g. "McNemar p_adj" -> "McNemar (≤0.50D) p_adj" so the tested threshold travels with the numbers
-    mc_t = df_results.attrs.get('mcnemar_threshold') if hasattr(df_results, 'attrs') else None
-    if mc_t is not None:
-        df_clean = df_clean.rename(columns={c: c.replace('McNemar', f'McNemar (≤{float(mc_t):.2f}D)')
-                                            for c in df_clean.columns if 'McNemar' in c})
-
-    df_clean.to_excel(writer, sheet_name=sheet_name, index=False)
-
-    _set_column_widths(writer, sheet_name, [15 if ' p' in col else 22 for col in df_clean.columns])
-
-    if hasattr(df_results, 'attrs') and 'methodology_summary' in df_results.attrs:
-        summary_data = df_results.attrs['methodology_summary']
-        if isinstance(summary_data, list):
-            meth_df = pd.DataFrame(summary_data)
-        elif isinstance(summary_data, pd.DataFrame):
-            meth_df = summary_data
-        else:
-            meth_df = pd.DataFrame()
-
-        if not meth_df.empty:
-            meth_sheet = 'Statistical Tests'
-            meth_df.to_excel(writer, sheet_name=meth_sheet, index=False)
-
-            _set_column_widths(writer, meth_sheet, [35 if idx == 0 else 75 for idx in range(len(meth_df.columns))])
-
-
-# ==============================================================================
-# ophthalmology_stats: extensions to biometry_stats_advanced
-# ==============================================================================
-# Everything above this line is biometry_stats_advanced, unchanged, so IOL users keep analyze_prediction_errors
-# and its output exactly. Everything below generalizes it to any prediction model evaluated on eyes (AI models,
-# formulas, devices), for continuous outputs and classifiers, using the same resamples, tests, p-value rules,
-# confidence intervals, Romano-Wolf adjustment and Excel output.
-
-CONTINUOUS_METRICS = ["bias", "mae", "rmse", "medae", "sd", "within"]
-BINARY_METRICS = ["auc", "brier", "logloss", "sensitivity", "specificity", "accuracy"]
-MEAN_LOSS_METRICS = {"bias", "mae", "rmse", "brier", "logloss"}
-
-# Column names taken as the reference (truth) when truth is not given and task is 'auto' or 'binary'. With
-# task='auto' and none of these present, the model columns are taken as prediction errors (continuous output).
-TRUTH_VARIANTS = ['truth', 'reference', 'reference_standard', 'ground_truth', 'groundtruth', 'label', 'y', 'y_true',
-                  'target', 'diagnosis', 'outcome', 'actual', 'observed', 'measured', 'gold_standard']
-# Numeric columns never auto-detected as models (the subgroup column is excluded as well)
-GENERIC_IGNORE = ['axl', 'al', 'axial_length', 'axiallength', 'acd', 'acdepth', 'k1', 'k2', 'meank', 'mean_k', 'k',
-                  'km', 'kmean', 'k_mean', 'avg_k', 'lt', 'lensthickness', 'cct',
-                  'wtw', 'hcd', 'iol_implanted', 'postoperative_refraction', 'corneal_refractive_index', 'eye', 'side',
-                  'laterality', 'od_os', 're_le', 'age', 'gender', 'gender_num', 'sex', 'visit',
-                  'site', 'centre', 'center', 'device', 'image_id', 'imageid']
-SUBGROUP_MAX_LEVELS = 10   # a numeric subgroup column with more distinct values is split into tertiles by default
-ADJUSTED_CI_METHODS = ('romano_wolf', 'bonferroni', 'holm', 'hommel', 'fdr_bh')   # methods with adjusted intervals
-P_ADJ_LABELS = {'romano_wolf': 'Romano-Wolf step-down', 'bonferroni': 'Bonferroni', 'holm': 'Holm',
-                'hommel': 'Hommel', 'fdr_bh': 'Benjamini-Hochberg (FDR)', 'fdr_by': 'Benjamini-Yekutieli (FDR)',
-                'sidak': 'Sidak', 'holm-sidak': 'Holm-Sidak', 'simes-hochberg': 'Hochberg',
-                'fdr_tsbh': 'two-stage Benjamini-Hochberg (FDR)',
-                'fdr_tsbky': 'two-stage Benjamini-Krieger-Yekutieli (FDR)'}
-SINGLE_P = "single comparison (p_adj = p)"
-SINGLE_CI = "single comparison (CI adj = CI)"
-
-DEFAULT_SETTINGS = {
-    "bootstrap_iterations": BOOTSTRAP_ITERATIONS,  # resamples (p-values on a grid of 1/(B+1))
-    "seed": None,                  # None: BOOTSTRAP_SEED
-    "fwer_method": MULTIPLE_TEST_METHOD,   # 'romano_wolf' (Hommel for tests without bootstrap nulls), 'holm', ...
-    "report_ci": True,             # 95% confidence interval for every difference (unadjusted and adjusted)
-    "ci_level": CI_LEVEL,
-    "within": MCNEMAR_THRESHOLD,   # continuous: tolerance for the proportion of eyes with |error| <= within
-    "threshold": 0.5,              # binary: probability threshold for sensitivity, specificity and accuracy
-    "invalid_threshold": None,     # continuous: eyes with |error| above this are excluded (IOL default 4.0 D)
-    "weighting": "eye",            # mean-loss metrics: 'eye', 'patient' or 'optimal' (minimum variance)
-    "unit": "patient",             # 'patient' (recommended) or 'eye' (every eye independent; for comparison)
-    "one_eye": False,              # keep one randomly chosen eye per patient (as ENFORCE_INDEPENDENCE)
-    "clip": 1e-15,                 # probabilities clipped to [clip, 1 - clip] for log-loss
-    "metrics": None,               # subset of the metrics for the task (default: all)
-    "min_group_size": MIN_GROUP_SIZE,
-    "subgroup_cuts": None,         # numeric subgroup column: cut points, e.g. [22, 24.5] -> <22, 22 to <24.5, >=24.5
-    "subgroup_bins": None,         # numeric subgroup column: number of equal-count quantile groups, e.g. 3 (tertiles)
-    "cross_min_patients": 20,      # crossed subgroups: cells with fewer patients get point estimates only
-    "verbose": True,
-}
-
-
-def _settings(settings):
-    s = dict(DEFAULT_SETTINGS)
-    s.update(settings or {})
-    if s["seed"] is None:
-        s["seed"] = BOOTSTRAP_SEED
-    if s["weighting"] not in ("eye", "patient", "optimal"):
-        raise ValueError("weighting must be 'eye', 'patient' or 'optimal'")
-    if s["subgroup_cuts"] is not None and s["subgroup_bins"] is not None:
-        raise ValueError("give subgroup_cuts or subgroup_bins, not both")
-    if s["subgroup_cuts"] is not None:
-        cuts = sorted({float(c) for c in np.atleast_1d(s["subgroup_cuts"])})
-        if not cuts or not np.all(np.isfinite(cuts)):
-            raise ValueError("subgroup_cuts must be one or more finite numbers")
-        s["subgroup_cuts"] = cuts
-    if s["subgroup_bins"] is not None:
-        if int(s["subgroup_bins"]) != s["subgroup_bins"] or int(s["subgroup_bins"]) < 2:
-            raise ValueError("subgroup_bins must be an integer of at least 2")
-        s["subgroup_bins"] = int(s["subgroup_bins"])
-    return s
-
-
-# ------------------------------------------------------------------------------
-# Fellow-eye correlation and the efficiency of keeping both eyes
-# ------------------------------------------------------------------------------
-def fellow_eye_correlation(values, cluster_idx):
-    """Pairwise intraclass correlation of a per-eye quantity between eyes of the same patient (rho).
-
-    Applied to the per-eye difference in loss between two models it gives ρΔ, the quantity that decides
-    how much eye-level tests are misled and how much a second eye adds (Kerry & Bland 2001; Eldridge 2006)."""
-    values = np.asarray(values, float)
-    m = np.bincount(cluster_idx).astype(float)
-    a = np.bincount(cluster_idx, weights=values)
-    q = np.bincount(cluster_idx, weights=values ** 2)
-    N, NP = m.sum(), np.sum(m * (m - 1))
-    if NP == 0 or N == 0:
-        return np.nan
-    mu = a.sum() / N
-    s2 = q.sum() / N - mu ** 2
-    if s2 <= 0:
-        return np.nan
-    return float((np.sum(a ** 2 - q) / NP - mu ** 2) / s2)
-
-
-def one_eye_factor(sizes, rho, weighting="eye"):
-    """How many times more patients one eye per patient needs for the same precision as the analysis of all
-    eyes with the given weighting (design effect for unequal cluster sizes; Kerry & Bland 2001)."""
-    m = np.asarray(sizes, float)
-    if not np.isfinite(rho) or len(m) == 0:
-        return np.nan
-    r = float(np.clip(rho, 0.0, 0.999))
-    K = len(m)
-    var = {"eye": np.sum(m * (1 + (m - 1) * r)) / np.sum(m) ** 2,
-           "patient": np.sum((1 + (m - 1) * r) / m) / K ** 2,
-           "optimal": 1.0 / np.sum(m / (1 + (m - 1) * r))}[weighting]
-    return float((1.0 / K) / var)
-
-
-def eye_weights(cluster_idx, weighting, rho=0.0):
-    """Per-eye weights: 'eye' 1; 'patient' 1/m (each patient counts once); 'optimal' 1/(1 + (m - 1) rho)."""
-    m = np.bincount(cluster_idx).astype(float)[cluster_idx]
-    if weighting == "eye":
-        return np.ones(len(cluster_idx))
-    if weighting == "patient":
-        return 1.0 / m
-    r = float(np.clip(rho if np.isfinite(rho) else 0.0, 0.0, 0.999))
-    return 1.0 / (1.0 + (m - 1.0) * r)
-
-
-# ------------------------------------------------------------------------------
-# Engine: (weighted) mean of any per-eye loss, every pair at once
-# ------------------------------------------------------------------------------
 def all_pairs_loss_bootstrap(L, cluster_idx, K, b_indices, weights=None, pairs=None, ci_level=None,
                              sqrt_keys=(), extra=None, chunk=None):
-    """Patient bootstrap-t (CR1) for differences in the mean of per-eye losses, for every pair of models.
+    """Patient bootstrap-t (CR1) for differences in the (weighted) mean of any per-eye loss, every pair of models.
 
-    The generalization of all_pairs_bootstrap's MPE/MAE/RMSE engine to any loss (Brier score, log-loss, ...)
-    and to weighted means: L maps a name to an n x J matrix of per-eye losses (one column per model); weights
-    (one per eye) default to 1, in which case the results equal all_pairs_bootstrap's for the same losses and
-    resamples. Keys in sqrt_keys are tested on the mean loss but report a percentile CI on the root scale
-    (RMSE from squared errors); their bootstrap draws on the root scale are returned too (DRAWS_<key>, for the
-    adjusted interval). extra maps names to per-cluster vectors whose bootstrap sums are returned
-    (used for the proportion CIs). Returns ({(j, k): result}, {name: B-vector of bootstrap sums}).
+    L maps a name to an n x J matrix of losses; with unit weights the results equal all_pairs_bootstrap's. Keys in
+    sqrt_keys are tested on the mean loss with a percentile CI on the root scale (RMSE), whose draws are returned
+    as DRAWS_<key>. extra maps names to per-patient vectors whose bootstrap sums are returned (proportion CIs).
+    Returns ({(j, k): result}, {name: bootstrap sums}).
     """
     names = list(L)
     n, J = L[names[0]].shape
@@ -1215,9 +527,44 @@ def all_pairs_loss_bootstrap(L, cluster_idx, K, b_indices, weights=None, pairs=N
     return out, extra_sums
 
 
-# ------------------------------------------------------------------------------
-# Engine: AUC (Obuchowski 1997; DeLong et al. 1988 when every patient has one eye)
-# ------------------------------------------------------------------------------
+def _resampled_cluster_sums(cols, b_indices, K, chunk=500):
+    """B x C matrix: the sum of each per-cluster vector in cols over the patients drawn in each resample."""
+    V = np.column_stack(cols)
+    out = np.empty((b_indices.shape[0], V.shape[1]))
+    for i in range(0, b_indices.shape[0], chunk):
+        out[i:i + chunk] = _resample_counts(b_indices[i:i + chunk], K) @ V
+    return out
+
+
+def continuous_percentile_draws(E, cluster_idx, K, b_indices, within, pairs=None):
+    """Bootstrap draws of the RMSE, SD and proportion-within differences for every pair of models (as behind the
+    percentile CIs of all_pairs_bootstrap), for the Bonferroni-type adjusted intervals."""
+    E = np.asarray(E, float)
+    n, J = E.shape
+    pairs = pairs or list(combinations(range(J), 2))
+    N_g = np.bincount(cluster_idx, minlength=K).astype(float)
+    S = np.stack([np.bincount(cluster_idx, weights=E[:, j], minlength=K) for j in range(J)], axis=1)
+    mean = S.sum(0) / N_g.sum()
+    C = S - np.outer(N_g, mean)
+    sq = [np.bincount(cluster_idx, weights=(E[:, j] - mean[j]) ** 2, minlength=K) for j in range(J)]
+    raw = [np.bincount(cluster_idx, weights=(E ** 2)[:, j], minlength=K) for j in range(J)]
+    prop = [np.bincount(cluster_idx, weights=(np.abs(E[:, j]) <= within).astype(float), minlength=K) for j in range(J)]
+    sums = _resampled_cluster_sums([N_g] + [C[:, j] for j in range(J)] + sq + raw + prop, b_indices, K)
+    bN = sums[:, :1]
+    c0, s0, r0, p0 = 1, 1 + J, 1 + 2 * J, 1 + 3 * J
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sd = np.sqrt(np.maximum(0, (sums[:, s0:s0 + J] - sums[:, c0:c0 + J] ** 2 / bN) / (bN - 1)))
+    rmse = np.sqrt(np.maximum(0, sums[:, r0:r0 + J] / bN))
+    pw = sums[:, p0:p0 + J] / bN
+    return {"rmse": {(j, k): rmse[:, j] - rmse[:, k] for j, k in pairs},
+            "sd": {(j, k): sd[:, j] - sd[:, k] for j, k in pairs},
+            "within": {(j, k): pw[:, j] - pw[:, k] for j, k in pairs}}
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# AUC: Obuchowski (1997) clustered ROC; DeLong et al (1988) when every patient has one eye
+# ----------------------------------------------------------------------------------------------------------------------
+
 def _placements(x_pos, y_neg):
     ys, xs = np.sort(y_neg), np.sort(x_pos)
     lt = np.searchsorted(ys, x_pos, side="left"); le = np.searchsorted(ys, x_pos, side="right")
@@ -1265,56 +612,320 @@ def auc_all_pairs(P, y, cluster_idx, K, pairs=None, ci_level=0.95):
     return out
 
 
-# ------------------------------------------------------------------------------
-# Bootstrap draws behind the percentile intervals of all_pairs_bootstrap (for the adjusted intervals)
-# ------------------------------------------------------------------------------
-def _resampled_cluster_sums(cols, b_indices, K, chunk=500):
-    """B x C matrix: the sum of each per-cluster vector in cols over the patients drawn in each resample."""
-    V = np.column_stack(cols)
-    out = np.empty((b_indices.shape[0], V.shape[1]))
-    for i in range(0, b_indices.shape[0], chunk):
-        out[i:i + chunk] = _resample_counts(b_indices[i:i + chunk], K) @ V
-    return out
+# ----------------------------------------------------------------------------------------------------------------------
+# Fellow-eye correlation and the value of a second eye
+# ----------------------------------------------------------------------------------------------------------------------
+
+def fellow_eye_correlation(values, cluster_idx):
+    """Pairwise intraclass correlation of a per-eye quantity between eyes of the same patient (rho).
+
+    Applied to the per-eye difference in loss between two models it gives ρΔ, the quantity that decides
+    how much eye-level tests are misled and how much a second eye adds (Kerry & Bland 2001; Eldridge 2006)."""
+    values = np.asarray(values, float)
+    m = np.bincount(cluster_idx).astype(float)
+    a = np.bincount(cluster_idx, weights=values)
+    q = np.bincount(cluster_idx, weights=values ** 2)
+    N, NP = m.sum(), np.sum(m * (m - 1))
+    if NP == 0 or N == 0:
+        return np.nan
+    mu = a.sum() / N
+    s2 = q.sum() / N - mu ** 2
+    if s2 <= 0:
+        return np.nan
+    return float((np.sum(a ** 2 - q) / NP - mu ** 2) / s2)
 
 
-def continuous_percentile_draws(E, cluster_idx, K, b_indices, within, pairs=None):
-    """Bootstrap draws of the RMSE, SD and proportion-within-tolerance differences for every pair of models, from the
-    same resamples and formulas as the percentile intervals of all_pairs_bootstrap (which does not return them).
-    Returns {'rmse' | 'sd' | 'within': {(j, k): B-vector}}; quantiles of these at level 1 - alpha/m give the
-    Bonferroni-adjusted intervals."""
-    E = np.asarray(E, float)
-    n, J = E.shape
-    pairs = pairs or list(combinations(range(J), 2))
-    N_g = np.bincount(cluster_idx, minlength=K).astype(float)
-    S = np.stack([np.bincount(cluster_idx, weights=E[:, j], minlength=K) for j in range(J)], axis=1)
-    mean = S.sum(0) / N_g.sum()
-    C = S - np.outer(N_g, mean)                                       # centered sums, as all_pairs_bootstrap
-    sq = [np.bincount(cluster_idx, weights=(E[:, j] - mean[j]) ** 2, minlength=K) for j in range(J)]
-    raw = [np.bincount(cluster_idx, weights=(E ** 2)[:, j], minlength=K) for j in range(J)]
-    prop = [np.bincount(cluster_idx, weights=(np.abs(E[:, j]) <= within).astype(float), minlength=K) for j in range(J)]
-    sums = _resampled_cluster_sums([N_g] + [C[:, j] for j in range(J)] + sq + raw + prop, b_indices, K)
-    bN = sums[:, :1]
-    c0, s0, r0, p0 = 1, 1 + J, 1 + 2 * J, 1 + 3 * J
-    with np.errstate(divide="ignore", invalid="ignore"):
-        sd = np.sqrt(np.maximum(0, (sums[:, s0:s0 + J] - sums[:, c0:c0 + J] ** 2 / bN) / (bN - 1)))
-    rmse = np.sqrt(np.maximum(0, sums[:, r0:r0 + J] / bN))
-    pw = sums[:, p0:p0 + J] / bN
-    return {"rmse": {(j, k): rmse[:, j] - rmse[:, k] for j, k in pairs},
-            "sd": {(j, k): sd[:, j] - sd[:, k] for j, k in pairs},
-            "within": {(j, k): pw[:, j] - pw[:, k] for j, k in pairs}}
+def one_eye_factor(sizes, rho, weighting="eye"):
+    """How many times more patients one eye per patient needs for the same precision as the analysis of all
+    eyes with the given weighting (design effect for unequal cluster sizes; Kerry & Bland 2001)."""
+    m = np.asarray(sizes, float)
+    if not np.isfinite(rho) or len(m) == 0:
+        return np.nan
+    r = float(np.clip(rho, 0.0, 0.999))
+    K = len(m)
+    var = {"eye": np.sum(m * (1 + (m - 1) * r)) / np.sum(m) ** 2,
+           "patient": np.sum((1 + (m - 1) * r) / m) / K ** 2,
+           "optimal": 1.0 / np.sum(m / (1 + (m - 1) * r))}[weighting]
+    return float((1.0 / K) / var)
 
 
-# ------------------------------------------------------------------------------
+def eye_weights(cluster_idx, weighting, rho=0.0):
+    """Per-eye weights: 'eye' 1; 'patient' 1/m (each patient counts once); 'optimal' 1/(1 + (m - 1) rho)."""
+    m = np.bincount(cluster_idx).astype(float)[cluster_idx]
+    if weighting == "eye":
+        return np.ones(len(cluster_idx))
+    if weighting == "patient":
+        return 1.0 / m
+    r = float(np.clip(rho if np.isfinite(rho) else 0.0, 0.0, 0.999))
+    return 1.0 / (1.0 + (m - 1.0) * r)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Multiplicity: adjusted p-values and matching adjusted intervals
+# ----------------------------------------------------------------------------------------------------------------------
+
+def romano_wolf_correction(obs_stats, boot_null_stats):
+    """Romano-Wolf step-down adjusted p-values from the bootstrap null distributions of |t|."""
+    M = len(obs_stats)
+    if M == 0:
+        return np.array([])
+
+    adj_p = np.zeros(M)
+    order = np.argsort(obs_stats)[::-1]
+    sorted_nulls = boot_null_stats[:, order]
+
+    max_nulls = np.maximum.accumulate(sorted_nulls[:, ::-1], axis=1)[:, ::-1]
+
+    for i in range(M):
+        p_val = _bootstrap_p(max_nulls[:, i], obs_stats[order[i]])
+        adj_p[order[i]] = p_val
+
+    for i in range(1, M):
+        adj_p[order[i]] = max(adj_p[order[i]], adj_p[order[i-1]])
+
+    return adj_p
+
+
+def adjusted_ci_critical(boot_null_stats, level, method, n_reject=None):
+    """Critical value c of each comparison's adjusted interval (difference ± c × scale), matching the
+    p-value adjustment. boot_null_stats: B x M bootstrap |t|.
+
+    romano_wolf     one c: the level-quantile of the largest |t| across comparisons (single-step max-|t|)
+    bonferroni      each comparison's 1 - (1 - level)/M quantile of |t|; also used for holm and hommel
+    fdr_bh          Benjamini-Yekutieli: level 1 - R(1 - level)/M, R = comparisons with adjusted p <= 1 - level
+    Returns M critical values, or None for other methods."""
+    N = np.asarray(boot_null_stats, float)
+    M, alpha = N.shape[1], 1 - level
+    if method == 'romano_wolf':
+        return np.full(M, np.quantile(N.max(axis=1), level))
+    if method in ('bonferroni', 'holm', 'hommel'):
+        q = 1 - alpha / M
+    elif method == 'fdr_bh':
+        q = 1 - max(int(n_reject or 0), 1) * alpha / M
+    else:
+        return None
+    return np.quantile(N, q, axis=0)
+
+
+def adjusted_ci_description(method, level):
+    """One-line description of the adjusted intervals for the methodology sheet."""
+    L = f"{level * 100:g}%"
+    if method == 'romano_wolf':
+        return (f"{L} simultaneous intervals: difference \u00b1 c \u00d7 SE, c = {L} quantile of the largest bootstrap |t| across "
+                "comparisons (single-step max-|t|, the interval counterpart of Romano-Wolf)")
+    if method == 'bonferroni':
+        return (f"{L} Bonferroni intervals: difference \u00b1 c \u00d7 SE, c = 1 - {1 - level:g}/m quantile of each comparison's "
+                "bootstrap |t| (m comparisons); they agree with the Bonferroni-adjusted p-values")
+    if method in ('holm', 'hommel'):
+        return (f"{L} Bonferroni intervals (c = 1 - {1 - level:g}/m quantile of each comparison's bootstrap |t|): "
+                f"{method.capitalize()} has no compatible finite intervals, so these are conservative and an interval can "
+                "include 0 next to a significant adjusted p-value")
+    if method == 'fdr_bh':
+        return (f"Benjamini-Yekutieli false-coverage-rate intervals at level 1 - R \u00d7 {1 - level:g}/m (R = comparisons "
+                f"with adjusted p \u2264 {1 - level:g}); they control the false coverage rate among the significant "
+                "comparisons, not simultaneous coverage")
+    return "None: adjusted intervals are given for Romano-Wolf, Bonferroni, Holm, Hommel and Benjamini-Hochberg only"
+
+
+RW_MAP = {"Boot (MPE) p": "MPE", "Boot (MAE) p": "MAE", "Boot (MedAE) p": "MedAE", "Boot (RMSE) p": "RMSE",
+          "Morgan-Pitman (SD) p": "SD", "Boot (Brier) p": "Brier", "Boot (LogLoss) p": "LogLoss"}
+
+
+def _adjust(wide, rw_stats, method, methods_out=None):
+    """Adjusted p-values for every p column: Romano-Wolf where bootstrap null distributions exist (else Hommel), or
+    the chosen method. methods_out, if given, receives the adjustment applied to each column."""
+    if wide.empty:
+        return wide
+    methods_out = {} if methods_out is None else methods_out
+    for col in [c for c in wide.columns if c.endswith(" p")]:
+        pvals = wide[col].values.astype(float)
+        adj = np.full(len(pvals), np.nan)
+        mask = ~np.isnan(pvals)
+        use_fallback = np.sum(mask) > 1
+        if not use_fallback:
+            adj[mask] = pvals[mask]
+            methods_out[col] = SINGLE_P
+        if method == "romano_wolf" and col in RW_MAP and use_fallback and RW_MAP[col] in rw_stats:
+            obs = np.array(rw_stats[RW_MAP[col]]["obs"])
+            nulls = rw_stats[RW_MAP[col]]["null"]
+            if len(obs) > 1 and len(nulls) > 0:
+                null_matrix = np.column_stack(nulls)
+                if np.sum(np.abs(null_matrix)) > 0:
+                    adj_rw = romano_wolf_correction(obs, null_matrix)
+                    adj[mask] = adj_rw[mask]
+                    use_fallback = False
+                    methods_out[col] = P_ADJ_LABELS["romano_wolf"]
+        if use_fallback and method not in (None, "none"):
+            current = FALLBACK_TEST_METHOD if method == "romano_wolf" else method
+            _, a, _, _ = multipletests(pvals[mask], method=current)
+            adj[mask] = a
+            methods_out[col] = P_ADJ_LABELS.get(current, str(current))
+        elif use_fallback:
+            adj[mask] = pvals[mask]
+            methods_out[col] = "none (p_adj = p; fwer_method='none')"
+        adj[mask] = np.maximum(adj[mask], pvals[mask])
+        wide.insert(wide.columns.get_loc(col) + 1, col.replace(" p", " p_adj"), adj)
+    # adjusted intervals next to each CI, matching the method used for the p-values (see adjusted_ci_critical)
+    return add_adjusted_cis(wide, rw_stats, metrics=("MPE", "MAE", "MedAE", "RMSE", "Brier", "LogLoss"), method=method)
+
+
+def add_adjusted_cis(df_results, rw_stats=None, metrics=('MPE', 'MAE', 'MedAE', 'RMSE'), method='romano_wolf'):
+    """Adjusted ('CI adj') intervals next to each bootstrap-t interval, matching the multiplicity method
+    (adjusted_ci_critical). With a single comparison the adjusted interval is the unadjusted one."""
+    if df_results.empty or method not in ADJUSTED_CI_METHODS:
+        return df_results
+    for metric in metrics:
+        dcol = f'{metric} Diff'
+        lows = [c for c in df_results.columns if c.startswith(f'{dcol} ') and c.endswith('% CI low') and 'adj' not in c]
+        if not lows:
+            continue
+        lbl = lows[0][len(dcol) + 1:-len(' low')]                       # e.g. '95% CI'
+        level = float(lbl.split('%')[0]) / 100
+        low_col, high_col = f'{dcol} {lbl} low', f'{dcol} {lbl} high'
+        if len(df_results) == 1:
+            adj_lo, adj_hi = df_results[low_col].values.astype(float), df_results[high_col].values.astype(float)
+        else:
+            st = (rw_stats or {}).get(metric, {})
+            diffs, scales = np.array(st.get('diff', []), float), np.array(st.get('scale', []), float)
+            if len(diffs) != len(df_results) or not (np.isfinite(diffs).all() and np.isfinite(scales).all()):
+                continue                                                # no statistic to adjust with (e.g. RMSE)
+            pcol = f'Boot ({metric}) p_adj'
+            n_rej = int(np.sum(df_results[pcol].values <= 1 - level + 1e-12)) if pcol in df_results.columns else None
+            c = adjusted_ci_critical(np.column_stack(st['null']), level, method, n_rej)
+            adj_lo, adj_hi = diffs - c * scales, diffs + c * scales
+        idx = df_results.columns.get_loc(high_col) + 1
+        for name, vals in ((f'{dcol} {lbl} adj low', adj_lo), (f'{dcol} {lbl} adj high', adj_hi)):
+            if name in df_results.columns:
+                df_results[name] = vals
+            else:
+                df_results.insert(idx, name, vals)
+                idx += 1
+    return df_results
+
+
+BOOTSTRAP_T_ADJ = {"bias", "mae", "medae", "brier", "logloss"}   # adjusted intervals from add_adjusted_cis
+PERCENTILE_ADJ = {"rmse", "sd", "within", "sensitivity", "specificity", "accuracy"}   # Bonferroni percentile
+
+
+def _adjusted_coverage(method, level, m, n_reject=0):
+    """Per-comparison coverage of a Bonferroni-type adjusted interval, as in adjusted_ci_critical: 1 - α/m for
+    Romano-Wolf (these metrics have no max-|t| statistic; their p-values use Hommel or a different statistic),
+    Bonferroni, Holm and Hommel; Benjamini-Yekutieli 1 - Rα/m for fdr_bh (R = comparisons with p_adj <= α)."""
+    alpha = 1 - level
+    if method in ("romano_wolf", "bonferroni", "holm", "hommel"):
+        return 1 - alpha / m
+    if method == "fdr_bh":
+        return 1 - max(int(n_reject), 1) * alpha / m
+    return None
+
+
+def _add_bonferroni_type_cis(wide, task, models, pct_draws, auc_se, s):
+    """Bonferroni-type adjusted intervals (level q = 1 - α/m; 1 - Rα/m for fdr_bh) for the metrics
+    without a bootstrap-t: AUC as difference ± z × SE; RMSE, SD and the proportions as percentile intervals of
+    the same resamples. With a single pair they equal the unadjusted intervals."""
+    if wide.empty or not s["report_ci"] or s["fwer_method"] not in ADJUSTED_CI_METHODS:
+        return wide
+    level = float(s["ci_level"])
+    lbl = f"{level * 100:g}% CI"
+    keys = [(models.index(a), models.index(b)) for a, b in zip(wide["Model A"], wide["Model B"])]
+    for metric in (CONTINUOUS_METRICS if task == "continuous" else BINARY_METRICS):
+        if metric not in PERCENTILE_ADJ and metric != "auc":
+            continue
+        dname, pname = WIDE_NAMES[metric]
+        low_col, high_col = f"{dname} {lbl} low", f"{dname} {lbl} high"
+        if low_col not in wide.columns or f"{dname} {lbl} adj low" in wide.columns:
+            continue                                     # (add_adjusted_cis copies RMSE's CI for a single pair)
+        if len(wide) == 1:
+            adj_lo, adj_hi = wide[low_col].values.astype(float), wide[high_col].values.astype(float)
+        else:
+            src = auc_se if metric == "auc" else pct_draws.get(metric, {})
+            m = int(np.sum(np.isfinite(wide[pname].values.astype(float))))
+            n_rej = int(np.sum(wide[pname.replace(" p", " p_adj")].values <= 1 - level + 1e-12))
+            q = _adjusted_coverage(s["fwer_method"], level, max(m, 1), n_rej)
+            a = (1 - q) / 2
+            adj_lo, adj_hi = np.full(len(wide), np.nan), np.full(len(wide), np.nan)
+            for i, key in enumerate(keys):
+                if key not in src or src[key] is None or not np.isfinite(wide[low_col].iloc[i]):
+                    continue
+                if metric == "auc":
+                    d, se = src[key]
+                    z = stats.norm.ppf(1 - a)
+                    adj_lo[i], adj_hi[i] = d - z * se, d + z * se
+                else:
+                    v = np.asarray(src[key], float)
+                    v = v[np.isfinite(v)]
+                    if len(v):
+                        adj_lo[i], adj_hi[i] = np.quantile(v, [a, 1 - a])
+        idx = wide.columns.get_loc(high_col) + 1
+        for name, vals in ((f"{dname} {lbl} adj low", adj_lo), (f"{dname} {lbl} adj high", adj_hi)):
+            wide.insert(idx, name, vals)
+            idx += 1
+    return wide
+
+
+def _adj_ci_matches(metric, fm):
+    """True if this metric's adjusted interval matches its adjusted p-value: Romano-Wolf simultaneous
+    intervals for the bootstrap-t metrics and MedAE, Bonferroni with Bonferroni, Benjamini-Yekutieli with
+    Benjamini-Hochberg. Otherwise the CI stays unadjusted."""
+    if fm in ("bonferroni", "fdr_bh"):
+        return True
+    return fm == "romano_wolf" and metric in BOOTSTRAP_T_ADJ
+
+
+def _drop_unmatched_adjusted_cis(wide, task, s):
+    """Remove the 'CI adj' columns of metrics whose adjusted p-value has no matching interval (_adj_ci_matches).
+    With a single model pair nothing is adjusted and the columns stay (they equal the unadjusted intervals)."""
+    if wide.empty or len(wide) == 1:
+        return wide
+    lbl = f"{float(s['ci_level']) * 100:g}% CI"
+    drop = []
+    for metric in (CONTINUOUS_METRICS if task == "continuous" else BINARY_METRICS):
+        if not _adj_ci_matches(metric, s["fwer_method"]):
+            drop += [c for c in (f"{WIDE_NAMES[metric][0]} {lbl} adj low", f"{WIDE_NAMES[metric][0]} {lbl} adj high")
+                     if c in wide.columns]
+    return wide.drop(columns=drop)
+
+
+def _ci_adj_label(metric, wide, s, has_clusters=True):
+    """How the adjusted interval of a metric was made (column ci_adj_method), or why there is none."""
+    fm = s["fwer_method"]
+    if (s["report_ci"] and fm in ADJUSTED_CI_METHODS and len(wide) > 1 and not _adj_ci_matches(metric, fm)):
+        why = ("its Romano-Wolf p-value comes from a different statistic" if fm == "romano_wolf"
+               and metric in ("rmse", "sd") else
+               f"{'Hommel' if fm == 'romano_wolf' else P_ADJ_LABELS.get(fm, fm)} p-values have no matching interval")
+        return f"not adjusted: {why} (the CI is unadjusted; fwer_method='bonferroni' gives matching intervals)"
+    if not s["report_ci"]:
+        return "not available: no confidence intervals (report_ci=False)"
+    if fm in (None, "none"):
+        return "not available: no multiplicity adjustment (fwer_method='none')"
+    if fm not in ADJUSTED_CI_METHODS:
+        return f"not available: {P_ADJ_LABELS.get(fm, fm)} has no interval counterpart"
+    if f"{WIDE_NAMES[metric][0]} {float(s['ci_level']) * 100:g}% CI adj low" not in wide.columns:
+        return "not available: no bootstrap statistic for this metric in this group"
+    if len(wide) == 1:
+        return SINGLE_CI
+    if fm == "fdr_bh":
+        head = "Benjamini-Yekutieli false-coverage-rate"
+    elif metric in BOOTSTRAP_T_ADJ and fm == "romano_wolf":
+        return "Romano-Wolf simultaneous (max-|t|)"
+    else:
+        head = "Bonferroni"
+    if metric in BOOTSTRAP_T_ADJ:
+        return f"{head} (bootstrap |t|)" if metric != "medae" else f"{head} (bootstrap, studentized by its SD)"
+    if metric == "auc":
+        return f"{head} (normal theory, {'Obuchowski' if has_clusters else 'DeLong'} SE)"
+    return f"{head} (percentile bootstrap)"
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 # Comparing models: one group of eyes
-# ------------------------------------------------------------------------------
-def _detect_columns(df, task, models, patient, truth, extra_ignore=()):
-    """Resolve the task and the patient, reference (truth) and model columns.
+# ----------------------------------------------------------------------------------------------------------------------
 
-    truth not given: with task 'auto' or 'binary' a column named as in TRUTH_VARIANTS is used if present; with task
-    'continuous' none is looked for, so the model columns are prediction errors. models not given: every numeric
-    column other than the patient, reference, GENERIC_IGNORE and extra_ignore (e.g. the subgroup) columns. task
-    'auto' becomes 'binary' when the reference is 0/1 and every model value lies in [0, 1], else 'continuous'
-    (prediction errors when there is no reference column)."""
+def _detect_columns(df, task, models, patient, truth, extra_ignore=()):
+    """Resolve the task and the patient, reference and model columns. Without truth, a column named as in
+    TRUTH_VARIANTS is the reference (not looked for when task is 'continuous'). Without models, every numeric column
+    other than the patient, reference, GENERIC_IGNORE and extra_ignore columns. 'auto' becomes 'binary' when the
+    reference is 0/1 and every model value lies in [0, 1]."""
     cols_lower = {str(c).lower(): c for c in df.columns}
     if patient is None:
         patient = next((cols_lower[v] for v in ['patient_id', 'id_patient', 'patientid', 'pt_id', 'id', 'hosp_id',
@@ -1349,7 +960,7 @@ def model_performance(P, y, task, models, metrics, cluster_idx, K, b_idx, s, has
     ci_level = float(s["ci_level"])
     a = (1 - ci_level) / 2
     method = "patient bootstrap, percentile" if has_clusters else "bootstrap, percentile"
-    stats = {}                                   # metric -> (point estimates per model, list of bootstrap chunks)
+    draws = {}                                   # metric -> bootstrap chunks
     if task == "continuous":
         E = P if y is None else P - y[:, None]
         absE = np.abs(E)
@@ -1386,7 +997,7 @@ def model_performance(P, y, task, models, metrics, cluster_idx, K, b_idx, s, has
                                  "sensitivity": correct[y == 1].mean(0) if pos.sum() else np.full(P.shape[1], np.nan),
                                  "specificity": correct[y == 0].mean(0) if neg.sum() else np.full(P.shape[1], np.nan),
                                  "accuracy": correct.mean(0)}.get(metric)
-        stats[metric] = []
+        draws[metric] = []
     B = b_idx.shape[0]
     for c0 in range(0, B, 250):
         cnt = np.zeros((min(250, B - c0), K))
@@ -1436,12 +1047,12 @@ def model_performance(P, y, task, models, metrics, cluster_idx, K, b_idx, s, has
                             v[:, j] = (wp * (below + 0.5 * wn)).sum(1) / (wp.sum(1) * wn.sum(1))
                 else:
                     continue
-            stats[metric].append(v)
+            draws[metric].append(v)
     rows = []
     for metric in metrics:
-        if not stats[metric] or point[metric] is None:
+        if not draws[metric] or point[metric] is None:
             continue
-        bs = np.vstack(stats[metric])
+        bs = np.vstack(draws[metric])
         for j, m in enumerate(models):
             col = bs[:, j]
             col = col[np.isfinite(col)]
@@ -1455,36 +1066,17 @@ def model_performance(P, y, task, models, metrics, cluster_idx, K, b_idx, s, has
 def compare_models(df, task="continuous", models=None, patient=None, truth=None, settings=None, group_name="All"):
     """Compare every pair of models on the same eyes, with the patient as the unit of analysis.
 
-    df       one row per eye: a patient ID column and one column per model
-    task     'continuous': each model column holds the prediction errors (prediction minus reference), the
-                           primary input; or, if truth is given, the predictions, and the errors are
-                           prediction - truth
-             'binary':     each model column holds a predicted probability, and truth the 0/1 diagnosis (reference
-                           standard), which is required: AUC, sensitivity and specificity are defined by it
-             'auto':       'binary' when the reference is 0/1 and every model value lies in [0, 1], else
-                           'continuous'. When truth is not given, a column named as in TRUTH_VARIANTS (truth,
-                           reference, diagnosis, measured, ...) is used as the reference if present; without one
-                           the model columns are prediction errors
-    models   columns holding each model's output (auto-detected if None: numeric columns other than the patient,
-             reference and metadata columns; see GENERIC_IGNORE)
-    patient  patient identifier column (auto-detected); eyes sharing an ID are resampled together
-    truth    reference value (optional for continuous outputs) or 0/1 diagnosis (required for classifiers)
+    task     'continuous': model columns hold prediction errors, or predictions if truth is given;
+             'binary': predicted probabilities, with truth the 0/1 diagnosis (required); 'auto': binary when the
+             reference is 0/1 and every model value lies in [0, 1] (see _detect_columns)
+    models, patient, truth   columns (auto-detected if None)
     settings dict overriding DEFAULT_SETTINGS
 
-    Returns (wide, long, info): wide has one row per model pair with differences, CIs, adjusted CIs ('CI adj'),
-    p-values and adjusted p-values in the biometry_stats_advanced layout; long has one row per pair and metric,
-    with the estimates for each model, the fellow-eye correlation of the loss difference (ρΔ, column rho_delta),
-    how many times more patients one eye per patient would need (one_eye_factor), the adjusted p-value and CI, and
-    the adjustment each got (p_adj_method, ci_adj_method); info describes the sample and the tests used, and
-    info["model_performance"] gives each model's own estimate of every metric with its patient-level 95% CI.
-
-    Adjusted intervals are given only where they match the adjusted p-value (_adj_ci_matches): Romano-Wolf
-    simultaneous (max-|t|) intervals for the bootstrap-t metrics (MPE, MAE, Brier, log-loss) and MedAE; with
-    'bonferroni', Bonferroni intervals for every metric (AUC as difference ± z(1 - α/2m) × SE; RMSE, SD and
-    proportions as the percentile interval at level 1 - α/m from the same resamples); with 'fdr_bh',
-    Benjamini-Yekutieli intervals (1 - Rα/m). m is the number of model pairs. With a single pair the adjusted
-    intervals equal the unadjusted ones.
-    """
+    Returns (wide, long, info). wide: one row per model pair with differences, CIs, adjusted CIs ('CI adj'),
+    p-values and adjusted p-values. long: one row per pair and metric, with each model's estimate, ρΔ (rho_delta),
+    the one-eye factor and the adjustments applied (p_adj_method, ci_adj_method). info: the sample, the tests, and
+    each model's own performance with its patient-level CI (info["model_performance"]). Adjusted intervals are
+    given only where they match the adjusted p-value (_adj_ci_matches)."""
     s = _settings(settings)
     task, models, patient, truth = _detect_columns(df, task, models, patient, truth)
     if len(models) < 2:
@@ -1518,7 +1110,7 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
     B = int(s["bootstrap_iterations"])
     ci_level = float(s["ci_level"]) if s["report_ci"] else None
 
-    # resamples and wild-bootstrap weights drawn exactly as in run_biometry_analysis
+    # patient resamples and Rademacher weights for the wild cluster bootstrap
     rng = np.random.default_rng(s["seed"])
     b_idx = np.empty((B, K), dtype=np.int32)
     for i in range(0, B, 500):
@@ -1565,12 +1157,11 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
     if task == "continuous":
         E = P if y is None else P - y[:, None]
         absE = np.abs(E)
-        boot = all_pairs_bootstrap(E, cluster_idx, K, b_idx, use_studentized=USE_STUDENTIZED_BS, ci_level=ci_level,
-                                   prop_threshold=s["within"])
+        boot = all_pairs_bootstrap(E, cluster_idx, K, b_idx, ci_level=ci_level, prop_threshold=s["within"])
         if s["weighting"] != "eye":
             wres = weighted_engine({"MPE": E, "MAE": absE, "MSE": E ** 2}, sqrt_keys=("MSE",))
-        needs_wcb = RUN_SD_TEST and (has_clusters or s["fwer_method"] == "romano_wolf")
-        sd_all = wild_cluster_sd_all_pairs(E, cluster_idx, K, W_g) if (RUN_SD_TEST and needs_wcb) else None
+        needs_wcb = has_clusters or s["fwer_method"] == "romano_wolf"
+        sd_all = wild_cluster_sd_all_pairs(E, cluster_idx, K, W_g) if needs_wcb else None
         if want_adj and {"rmse", "sd", "within"} & set(metrics):
             pct_draws = continuous_percentile_draws(E, cluster_idx, K, b_idx, s["within"], pairs)
             if s["weighting"] != "eye":                     # the RMSE interval then comes from the weighted engine
@@ -1605,7 +1196,7 @@ def compare_models(df, task="continuous", models=None, patient=None, truth=None,
                 add("medae", j, k, np.median(np.abs(ea)), np.median(np.abs(eb)),
                     np.median(np.abs(ea)) - np.median(np.abs(eb)), r.get("CI_MedAE"), r["P_MedAE"], np.nan,
                     "percentile patient bootstrap" if has_clusters else "percentile bootstrap")
-            if "sd" in metrics and RUN_SD_TEST:
+            if "sd" in metrics:
                 if needs_wcb:
                     p_sd, obs_sd, null_sd = sd_all[(j, k)]
                     test = "Morgan-Pitman, wild cluster bootstrap"
@@ -1714,8 +1305,6 @@ WIDE_NAMES = {
     "logloss": ("LogLoss Diff", "Boot (LogLoss) p"), "sensitivity": ("Sensitivity Diff", "Sensitivity p"),
     "specificity": ("Specificity Diff", "Specificity p"), "accuracy": ("Accuracy Diff", "Accuracy p"),
 }
-RW_MAP = {"Boot (MPE) p": "MPE", "Boot (MAE) p": "MAE", "Boot (MedAE) p": "MedAE", "Boot (RMSE) p": "RMSE",
-          "Morgan-Pitman (SD) p": "SD", "Boot (Brier) p": "Brier", "Boot (LogLoss) p": "LogLoss"}
 
 
 def _to_wide(long, task, n, K, group_name, s):
@@ -1738,161 +1327,6 @@ def _to_wide(long, task, n, K, group_name, s):
             row[pname] = r["p"]
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def _adjust(wide, rw_stats, method, methods_out=None):
-    """adjust_pvalues with the Romano-Wolf mapping extended to the new bootstrap metrics. methods_out (a dict), if
-    given, receives the adjustment applied to each p-value column (e.g. 'Romano-Wolf step-down', 'Hommel')."""
-    if wide.empty:
-        return wide
-    methods_out = {} if methods_out is None else methods_out
-    for col in [c for c in wide.columns if c.endswith(" p")]:
-        pvals = wide[col].values.astype(float)
-        adj = np.full(len(pvals), np.nan)
-        mask = ~np.isnan(pvals)
-        use_fallback = np.sum(mask) > 1
-        if not use_fallback:
-            adj[mask] = pvals[mask]
-            methods_out[col] = SINGLE_P
-        if method == "romano_wolf" and col in RW_MAP and use_fallback and RW_MAP[col] in rw_stats:
-            obs = np.array(rw_stats[RW_MAP[col]]["obs"])
-            nulls = rw_stats[RW_MAP[col]]["null"]
-            if len(obs) > 1 and len(nulls) > 0:
-                null_matrix = np.column_stack(nulls)
-                if np.sum(np.abs(null_matrix)) > 0:
-                    adj_rw = romano_wolf_correction(obs, null_matrix)
-                    adj[mask] = adj_rw[mask]
-                    use_fallback = False
-                    methods_out[col] = P_ADJ_LABELS["romano_wolf"]
-        if use_fallback and method not in (None, "none"):
-            current = FALLBACK_TEST_METHOD if method == "romano_wolf" else method
-            _, a, _, _ = multipletests(pvals[mask], method=current)
-            adj[mask] = a
-            methods_out[col] = P_ADJ_LABELS.get(current, str(current))
-        elif use_fallback:
-            adj[mask] = pvals[mask]
-            methods_out[col] = "none (p_adj = p; fwer_method='none')"
-        adj[mask] = np.maximum(adj[mask], pvals[mask])
-        wide.insert(wide.columns.get_loc(col) + 1, col.replace(" p", " p_adj"), adj)
-    # adjusted intervals next to each CI, matching the method used for the p-values (see adjusted_ci_critical)
-    return add_adjusted_cis(wide, rw_stats, metrics=("MPE", "MAE", "MedAE", "RMSE", "Brier", "LogLoss"), method=method)
-
-
-BOOTSTRAP_T_ADJ = {"bias", "mae", "medae", "brier", "logloss"}   # adjusted intervals from add_adjusted_cis
-PERCENTILE_ADJ = {"rmse", "sd", "within", "sensitivity", "specificity", "accuracy"}   # Bonferroni percentile
-
-
-def _adjusted_coverage(method, level, m, n_reject=0):
-    """Per-comparison coverage of a Bonferroni-type adjusted interval, as in adjusted_ci_critical: 1 - α/m for
-    Romano-Wolf (these metrics have no max-|t| statistic; their p-values use Hommel or a different statistic),
-    Bonferroni, Holm and Hommel; Benjamini-Yekutieli 1 - Rα/m for fdr_bh (R = comparisons with p_adj <= α)."""
-    alpha = 1 - level
-    if method in ("romano_wolf", "bonferroni", "holm", "hommel"):
-        return 1 - alpha / m
-    if method == "fdr_bh":
-        return 1 - max(int(n_reject), 1) * alpha / m
-    return None
-
-
-def _add_bonferroni_type_cis(wide, task, models, pct_draws, auc_se, s):
-    """Adjusted ('CI adj') intervals for the metrics whose interval is not a bootstrap-t: AUC, difference ± z × SE
-    with z the 1 - (1 - q)/2 normal quantile; RMSE, SD and the proportions, the percentile interval at level q from
-    the same bootstrap draws as the unadjusted interval. q = 1 - α/m (Bonferroni; 1 - Rα/m for fdr_bh), m being the
-    number of model pairs with a p-value for that metric. With a single pair they equal the unadjusted intervals."""
-    if wide.empty or not s["report_ci"] or s["fwer_method"] not in ADJUSTED_CI_METHODS:
-        return wide
-    level = float(s["ci_level"])
-    lbl = f"{level * 100:g}% CI"
-    keys = [(models.index(a), models.index(b)) for a, b in zip(wide["Model A"], wide["Model B"])]
-    for metric in (CONTINUOUS_METRICS if task == "continuous" else BINARY_METRICS):
-        if metric not in PERCENTILE_ADJ and metric != "auc":
-            continue
-        dname, pname = WIDE_NAMES[metric]
-        low_col, high_col = f"{dname} {lbl} low", f"{dname} {lbl} high"
-        if low_col not in wide.columns or f"{dname} {lbl} adj low" in wide.columns:
-            continue                                     # (add_adjusted_cis copies RMSE's CI for a single pair)
-        if len(wide) == 1:
-            adj_lo, adj_hi = wide[low_col].values.astype(float), wide[high_col].values.astype(float)
-        else:
-            src = auc_se if metric == "auc" else pct_draws.get(metric, {})
-            m = int(np.sum(np.isfinite(wide[pname].values.astype(float))))
-            n_rej = int(np.sum(wide[pname.replace(" p", " p_adj")].values <= 1 - level + 1e-12))
-            q = _adjusted_coverage(s["fwer_method"], level, max(m, 1), n_rej)
-            a = (1 - q) / 2
-            adj_lo, adj_hi = np.full(len(wide), np.nan), np.full(len(wide), np.nan)
-            for i, key in enumerate(keys):
-                if key not in src or src[key] is None or not np.isfinite(wide[low_col].iloc[i]):
-                    continue
-                if metric == "auc":
-                    d, se = src[key]
-                    z = stats.norm.ppf(1 - a)
-                    adj_lo[i], adj_hi[i] = d - z * se, d + z * se
-                else:
-                    v = np.asarray(src[key], float)
-                    v = v[np.isfinite(v)]
-                    if len(v):
-                        adj_lo[i], adj_hi[i] = np.quantile(v, [a, 1 - a])
-        idx = wide.columns.get_loc(high_col) + 1
-        for name, vals in ((f"{dname} {lbl} adj low", adj_lo), (f"{dname} {lbl} adj high", adj_hi)):
-            wide.insert(idx, name, vals)
-            idx += 1
-    return wide
-
-
-def _adj_ci_matches(metric, fm):
-    """True if an adjusted interval of this metric matches its adjusted p-value: Romano-Wolf simultaneous intervals
-    for the bootstrap-t metrics (and the MedAE), Bonferroni intervals with Bonferroni p-values, and
-    Benjamini-Yekutieli intervals with Benjamini-Hochberg. Romano-Wolf p-values of the RMSE (tested on the MSE) and
-    SD (Morgan-Pitman), and Hommel or Holm p-values, have no matching interval, so their CIs are left unadjusted
-    rather than given a Bonferroni interval that could disagree with the p-value."""
-    if fm in ("bonferroni", "fdr_bh"):
-        return True
-    return fm == "romano_wolf" and metric in BOOTSTRAP_T_ADJ
-
-
-def _drop_unmatched_adjusted_cis(wide, task, s):
-    """Remove the 'CI adj' columns of metrics whose adjusted p-value has no matching interval (_adj_ci_matches).
-    With a single model pair nothing is adjusted and the columns stay (they equal the unadjusted intervals)."""
-    if wide.empty or len(wide) == 1:
-        return wide
-    lbl = f"{float(s['ci_level']) * 100:g}% CI"
-    drop = []
-    for metric in (CONTINUOUS_METRICS if task == "continuous" else BINARY_METRICS):
-        if not _adj_ci_matches(metric, s["fwer_method"]):
-            drop += [c for c in (f"{WIDE_NAMES[metric][0]} {lbl} adj low", f"{WIDE_NAMES[metric][0]} {lbl} adj high")
-                     if c in wide.columns]
-    return wide.drop(columns=drop)
-
-
-def _ci_adj_label(metric, wide, s, has_clusters=True):
-    """How the adjusted interval of a metric was made (column ci_adj_method), or why there is none."""
-    fm = s["fwer_method"]
-    if (s["report_ci"] and fm in ADJUSTED_CI_METHODS and len(wide) > 1 and not _adj_ci_matches(metric, fm)):
-        why = ("its Romano-Wolf p-value comes from a different statistic" if fm == "romano_wolf"
-               and metric in ("rmse", "sd") else
-               f"{'Hommel' if fm == 'romano_wolf' else P_ADJ_LABELS.get(fm, fm)} p-values have no matching interval")
-        return f"not adjusted: {why} (the CI is unadjusted; fwer_method='bonferroni' gives matching intervals)"
-    if not s["report_ci"]:
-        return "not available: no confidence intervals (report_ci=False)"
-    if fm in (None, "none"):
-        return "not available: no multiplicity adjustment (fwer_method='none')"
-    if fm not in ADJUSTED_CI_METHODS:
-        return f"not available: {P_ADJ_LABELS.get(fm, fm)} has no interval counterpart"
-    if f"{WIDE_NAMES[metric][0]} {float(s['ci_level']) * 100:g}% CI adj low" not in wide.columns:
-        return "not available: no bootstrap statistic for this metric in this group"
-    if len(wide) == 1:
-        return SINGLE_CI
-    if fm == "fdr_bh":
-        head = "Benjamini-Yekutieli false-coverage-rate"
-    elif metric in BOOTSTRAP_T_ADJ and fm == "romano_wolf":
-        return "Romano-Wolf simultaneous (max-|t|)"
-    else:
-        head = "Bonferroni"
-    if metric in BOOTSTRAP_T_ADJ:
-        return f"{head} (bootstrap |t|)" if metric != "medae" else f"{head} (bootstrap, studentized by its SD)"
-    if metric == "auc":
-        return f"{head} (normal theory, {'Obuchowski' if has_clusters else 'DeLong'} SE)"
-    return f"{head} (percentile bootstrap)"
 
 
 def _lookup_adj(wide, r):
@@ -1989,9 +1423,10 @@ def _methodology(long, task, has_clusters, s, n_pairs=None):
     return m
 
 
-# ------------------------------------------------------------------------------
-# Full analysis: all eyes and optional subgroups (e.g. laterality, device, center, axial length)
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------------------------------
+# Subgroups and the full analysis
+# ----------------------------------------------------------------------------------------------------------------------
+
 QUANTILE_NAMES = {2: "half", 3: "tertile", 4: "quartile", 5: "quintile", 10: "decile"}
 
 
@@ -2009,18 +1444,11 @@ def _bound(edges, i):
 
 
 def define_subgroups(df, column, cuts=None, bins=None, max_levels=SUBGROUP_MAX_LEVELS):
-    """Split the eyes into subgroups by one column of any type.
-
-    nominal (strings, booleans, unordered categories)  one subgroup per level, 'eye = L'
-    ordinal (ordered categories; numeric columns with at most max_levels distinct values)  one per level, in order
-    continuous (numeric)  cuts: cut points, e.g. [22, 24.5] gives '<22', '22 to <24.5' and '>=24.5' (each interval
-                          includes its lower cut point); bins: that many equal-count quantile groups (equal numbers of
-                          eyes, cut at the quantiles), labeled with the range of values they hold. A numeric column with
-                          more than max_levels distinct values and neither cuts nor bins is split into tertiles.
-    Eyes with no value are in no subgroup. Returns (groups, description): groups is a list of (name, boolean mask
-    over the rows of df, definition); description has the column, its type ('kind'), a 'summary' line for the
-    methodology, whether tertiles were used by default ('default_bins'), and the number of eyes with no value.
-    """
+    """Split the eyes by one column: one subgroup per level (nominal, ordinal, or numeric with at most
+    max_levels values), or for a numeric column, intervals at cut points ('<22', '22 to <24.5', '>=24.5'; each
+    includes its lower cut point) or equal-count quantile groups (bins; tertiles by default when there are more
+    than max_levels values). Eyes with no value are in no subgroup. Returns (groups, description): groups lists
+    (name, mask, definition); description has the column, its kind and a summary line."""
     if column not in df.columns:
         raise KeyError(f"subgroup column {column!r} is not in the data")
     col = df[column]
@@ -2091,8 +1519,6 @@ def define_subgroups(df, column, cuts=None, bins=None, max_levels=SUBGROUP_MAX_L
     return groups, {"column": column, "kind": kind, "summary": summary, "default_bins": default_bins,
                     "n_missing": n_missing}
 
-
-import re  # noqa: E402
 
 _SPEC_RE = re.compile(r"^(?P<col>.+?):(?P<key>bins|cuts)=(?P<val>[^:]+)$")
 
@@ -2180,32 +1606,17 @@ def _blank_tests(w, l, info, why):
 
 
 def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=None, cross=None, settings=None):
-    """compare_models for all eyes and for each subgroup. Returns the wide table (one row per group and model pair)
-    with the long table, each model's performance, the methodology and the sample (group_info) in .attrs, ready for
-    write_results_to_excel.
+    """compare_models for all eyes and for each subgroup; returns the wide table with the long table, each
+    model's performance, the methodology and the sample in .attrs, for write_results_to_excel.
 
-    df        one row per eye: a patient ID column and, for continuous outputs, one column of prediction errors
-              (prediction minus reference) per model; or predictions with truth naming the reference column. For
-              classifiers, one column of predicted probabilities per model and truth, the 0/1 diagnosis (required:
-              AUC, sensitivity and specificity are defined by it). See compare_models for task='auto'.
-    subgroup  one subgroup definition or a list of them, each analyzed separately (not crossed). A definition is a
-              column of any type: nominal (e.g. 'eye' for right and left eyes), ordinal, or continuous (e.g. axial
-              length), with its own cut points or number of equal-count groups: 'axial_length:cuts=22,24.5,26',
-              'mean_k:bins=5', ('mean_k', {'bins': 5}) or {'column': 'mean_k', 'bins': 5} (see
-              parse_subgroup_spec). A numeric column with more than 10 distinct values and neither is split into
-              tertiles. For a single column name, settings subgroup_cuts or subgroup_bins can be used instead.
-    cross     optional pair of definitions [rows, columns] crossed with each other, e.g.
-              ['axial_length:cuts=22,26', 'mean_k:bins=3'] for 3 x 3 cells. Off by default. Cut points come from all
-              eyes, so a row or column covers the same range in every cell. Cells with fewer than
-              settings['cross_min_patients'] patients (default 20) get point estimates only, without intervals or
-              tests. write_results_to_excel adds a 'Grid' sheet: each model's performance in each cell, colored
-              from best to worst, for heat maps.
+    subgroup  a definition or a list of them, each analyzed separately: a column of any type ('eye'), or a numeric
+              column with cut points or equal-count groups ('axial_length:cuts=22,24.5', 'mean_k:bins=5'; see
+              parse_subgroup_spec). For a single column name, settings subgroup_cuts or subgroup_bins also work.
+    cross     optional [rows, columns] definitions crossed with each other (off by default); cells with fewer than
+              settings['cross_min_patients'] patients get point estimates only. Adds the 'Grid' sheet.
 
-    The task and the model, patient and reference columns are found once, on all eyes, and used for every group.
-    Subgroup and crossed columns are never taken as models. Each group is analyzed separately: p-values and
-    intervals are adjusted for the model pairs within the group, not across groups, so subgroup results are
-    exploratory. group_info records each group's definition, e.g. 'axial_length 22 to <24.5: 412 eyes, 230
-    patients'."""
+    Models and the patient and reference columns are found once, on all eyes. Each group is adjusted for its own
+    model pairs, so subgroup results are exploratory."""
     s = _settings(settings)
     specs = _subgroup_specs(subgroup, s)
     cross_specs = None
@@ -2311,18 +1722,49 @@ def analyze(df, task="auto", models=None, patient=None, truth=None, subgroup=Non
     return final
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# Excel output
+# ----------------------------------------------------------------------------------------------------------------------
+
 GRID_METRIC_LABELS = {"bias": "Mean error", "mae": "Mean absolute error", "rmse": "Root mean squared error",
-                 "medae": "Median absolute error", "sd": "SD of the error", "within": "Proportion within tolerance",
-                 "auc": "AUC", "brier": "Brier score", "logloss": "Log-loss", "sensitivity": "Sensitivity",
-                 "specificity": "Specificity", "accuracy": "Accuracy"}
+                      "medae": "Median absolute error", "sd": "SD of the error", "within": "Proportion within tolerance",
+                      "auc": "AUC", "brier": "Brier score", "logloss": "Log-loss", "sensitivity": "Sensitivity",
+                      "specificity": "Specificity", "accuracy": "Accuracy"}
 LOWER_IS_BETTER = {"mae", "rmse", "medae", "sd", "brier", "logloss"}
 HIGHER_IS_BETTER = {"within", "auc", "sensitivity", "specificity", "accuracy"}
 
 
+def _set_column_widths(writer, sheet_name, widths):
+    """Column widths for an openpyxl or an xlsxwriter ExcelWriter sheet."""
+    try:
+        ws = writer.sheets[sheet_name]
+        if hasattr(ws, 'set_column'):                                   # xlsxwriter
+            for idx, w in enumerate(widths):
+                ws.set_column(idx, idx, w)
+        else:                                                           # openpyxl
+            from openpyxl.utils import get_column_letter
+            for idx, w in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(idx)].width = w
+    except (ImportError, AttributeError, KeyError):
+        pass
+
+
+def _write_results_sheet(results, writer):
+    """The comparisons ('Results') and the tests and adjustments used ('Statistical Tests')."""
+    if results.empty:
+        return
+    results.to_excel(writer, sheet_name="Results", index=False)
+    _set_column_widths(writer, "Results", [15 if " p" in c else 22 for c in results.columns])
+    summary = results.attrs.get("methodology_summary")
+    if summary:
+        meth = pd.DataFrame(summary)
+        meth.to_excel(writer, sheet_name="Statistical Tests", index=False)
+        _set_column_widths(writer, "Statistical Tests", [35] + [75] * (len(meth.columns) - 1))
+
+
 def _write_grid_sheet(path, results):
-    """'Grid' sheet for crossed subgroups: for each metric, one block per model (rows and columns are the two
-    subgroups), with a color scale shared by the models of that metric (white best, red worst; for the mean error,
-    red the further from 0), so the cells where a model does poorly stand out."""
+    """Grid sheet for crossed subgroups: one block per metric and model, with a color scale shared by the
+    models of a metric (white best, red worst; for the mean error, red furthest from 0)."""
     grid = results.attrs.get("grid")
     mp = pd.DataFrame(results.attrs.get("model_performance", []))
     if not grid or mp.empty:
@@ -2408,13 +1850,11 @@ def _write_grid_sheet(path, results):
 
 
 def write_results_to_excel(results, path):
-    """Write the comparisons (sheet 'Results'), the tests and adjustments used ('Statistical Tests'), each model's
-    performance with its patient-level CI ('Model Performance'), every comparison with its CI, adjusted CI, ρΔ
-    (rho_delta), one-eye factor and the adjustment applied (p_adj_method, ci_adj_method; 'Estimates'), and the
-    sample with each group's definition ('Sample'). With crossed subgroups, a 'Grid' sheet gives each model's
-    performance in each cell, colored from best to worst, for heat maps."""
+    """Write the sheets Results, Statistical Tests, Model Performance (each model's performance with
+    its patient-level CI), Estimates (every comparison with ρΔ, the one-eye factor and the adjustments) and
+    Sample, plus Grid with crossed subgroups."""
     with pd.ExcelWriter(path) as writer:
-        write_advanced_stats_to_excel(results, writer, sheet_name="Results")
+        _write_results_sheet(results, writer)
         if results.attrs.get("model_performance"):
             mp = pd.DataFrame(results.attrs["model_performance"])
             mp.to_excel(writer, sheet_name="Model Performance", index=False)
@@ -2431,6 +1871,10 @@ def write_results_to_excel(results, path):
     if results.attrs.get("grid"):
         _write_grid_sheet(path, results)
 
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Command line
+# ----------------------------------------------------------------------------------------------------------------------
 
 def _command_line(argv=None):
     import argparse

@@ -1,15 +1,8 @@
-"""
-Checks for ophthalmology_stats.   Run:  python test_ophthalmology_stats.py   (or pytest)
-
-The key check is the first group: for continuous outputs, ophthalmology_stats gives exactly the same differences,
-confidence intervals, p-values and Romano-Wolf adjusted p-values as biometry_stats_advanced on the same data and
-seed, so it is an extension of that library, not a different method.
-"""
+"""Checks for ophthalmology_stats. Run: python tests/test_ophthalmology_stats.py (or pytest)."""
 import os
 import sys
 import tempfile
 import warnings
-import importlib.util
 
 import numpy as np
 import pandas as pd
@@ -19,7 +12,7 @@ ROOT = os.path.join(HERE, "..")
 sys.path.insert(0, ROOT)
 import ophthalmology_stats as osx  # noqa: E402
 
-FOUNDATION = os.path.join(HERE, "reference", "biometry_stats_advanced.py")   # biometry-stats, for the identity check
+EXPECTED = os.path.join(HERE, "expected_continuous.csv")   # version 1.2 results, identical to biometry-stats
 RESULTS = []
 
 
@@ -28,7 +21,7 @@ def check(name, cond):
     print(("[PASS] " if cond else "[FAIL] ") + name)
 
 
-def iol_like_data(n_pat=180, frac=0.5, J=4, seed=1):
+def continuous_data(n_pat=180, frac=0.5, J=4, seed=1):
     rng = np.random.default_rng(seed)
     sizes = np.where(rng.random(n_pat) < frac, 2, 1)
     pid = np.repeat(np.arange(n_pat), sizes)
@@ -57,36 +50,18 @@ def binary_data(n_pat=220, frac=0.6, J=3, seed=2, one_eye=False):
     return df
 
 
-def test_foundation_unchanged():
-    src = open(FOUNDATION).read()
-    body = src[src.index('"""', 3) + 3:]
-    mine = open(os.path.join(ROOT, "ophthalmology_stats.py")).read()
-    check("biometry_stats_advanced is included unchanged", body.strip() in mine)
+def test_matches_version_1_2():
+    wide, _, _ = osx.compare_models(continuous_data().drop(columns=["eye"]), task="continuous",
+                                    settings={"bootstrap_iterations": 999, "invalid_threshold": 4.0, "verbose": False})
+    ref = pd.read_csv(EXPECTED)
+    num = [c for c in ref.columns if c not in ("Model A", "Model B")]
+    worst = float(np.nanmax(np.abs(ref[num].values - wide[num].values.astype(float))))
+    check(f"continuous results identical to version 1.2 and biometry-stats ({len(num)} columns, max |diff| {worst:.1e})",
+          list(ref.columns) == [c for c in wide.columns if c != "Group"] and worst < 1e-12)
 
 
-def test_identity_with_foundation():
-    spec = importlib.util.spec_from_file_location("bsa", FOUNDATION)
-    bsa = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bsa)
-    df = iol_like_data()
-    B = 999
-    fs = {"bootstrap_iterations": B, "report_ci": True}
-    res_f, rw_f, _ = bsa.run_biometry_analysis(df.drop(columns=["eye"]), "All", settings=fs)
-    res_f = bsa.adjust_pvalues(res_f, rw_stats=rw_f, method="romano_wolf")
-    wide, long, info = osx.compare_models(df.drop(columns=["eye"]), task="continuous",
-                                          settings={"bootstrap_iterations": B, "invalid_threshold": 4.0,
-                                                    "verbose": False})
-    common = [c for c in res_f.columns if c in wide.columns and c not in ("Group", "N")]
-    worst = 0.0
-    for c in common:
-        a, b = res_f[c].values.astype(float), wide[c].values.astype(float)
-        worst = max(worst, float(np.nanmax(np.abs(a - b))))
-    check(f"continuous results identical to biometry_stats_advanced ({len(common)} columns, max |diff| {worst:.1e})",
-          len(common) >= 25 and worst < 1e-12)
-
-
-def test_loss_engine_matches_foundation():
-    df = iol_like_data(seed=3)
+def test_loss_engine_matches_continuous_engine():
+    df = continuous_data(seed=3)
     E = df[[c for c in df.columns if c.startswith("F")]].values
     _, idx = np.unique(df.patient_id.astype(str).values, return_inverse=True)
     K = idx.max() + 1
@@ -96,7 +71,7 @@ def test_loss_engine_matches_foundation():
     g, _ = osx.all_pairs_loss_bootstrap({"MAE": np.abs(E), "MPE": E}, idx, K, b, ci_level=0.95)
     ok = all(abs(f[k]["P_MAE"] - g[k]["P_MAE"]) < 1e-12 and abs(f[k]["P_MPE"] - g[k]["P_MPE"]) < 1e-12
              and np.allclose(f[k]["CI_MAE"], g[k]["CI_MAE"]) for k in f)
-    check("generic loss engine reproduces the foundation bootstrap-t (MAE, MPE, CIs)", ok)
+    check("generic loss engine reproduces the continuous bootstrap-t (MAE, MPE, CIs)", ok)
 
 
 def _delong(P, y, j, k):
@@ -174,7 +149,7 @@ def test_model_performance():
 
 def test_adjusted_cis():
     lbl = "95% CI"
-    df = iol_like_data(seed=5).drop(columns=["eye"])
+    df = continuous_data(seed=5).drop(columns=["eye"])
     wide, long, _ = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 999, "verbose": False})
     ok_contain, ok_wider, ok_consistent = True, True, True
     for m in ("MPE", "MAE", "MedAE"):
@@ -205,7 +180,7 @@ def test_adjusted_cis():
 
 def test_adjusted_cis_follow_fwer_method():
     lbl = "95% CI"
-    df = iol_like_data(seed=5).drop(columns=["eye"])
+    df = continuous_data(seed=5).drop(columns=["eye"])
     widths, ok = {}, True
     for method in ("romano_wolf", "bonferroni", "fdr_bh"):
         w, _, info = osx.compare_models(df, task="continuous", settings={"bootstrap_iterations": 1999, "fwer_method": method,
@@ -232,7 +207,7 @@ def test_adjusted_cis_follow_fwer_method():
 
 def with_axial_length(n_pat=240, seed=8):
     """iol_like_data with a numeric axial length per eye (fellow eyes alike) and a nominal site per patient."""
-    df = iol_like_data(n_pat=n_pat, seed=seed)
+    df = continuous_data(n_pat=n_pat, seed=seed)
     rng = np.random.default_rng(seed)
     pid = df.patient_id.str[1:].astype(int).values
     df["axial_length_mm"] = np.round(rng.normal(23.5, 1.2, n_pat)[pid] + rng.normal(0, 0.1, len(df)), 2)
@@ -254,8 +229,12 @@ def _same_frames(a, b):
 
 
 def test_prediction_errors_are_the_primary_input():
-    pred = pd.read_csv(os.path.join(ROOT, "examples", "example_continuous.csv"))
+    err = pd.read_csv(os.path.join(ROOT, "examples", "example_continuous.csv")).drop(columns=["axial_length", "mean_k"])
     models = ["model_A", "model_B", "model_C"]
+    pred = err.copy()
+    pred.insert(2, "truth", np.round(np.random.default_rng(11).normal(0, 2, len(err)), 2))
+    for m in models:
+        pred[m] = err[m] + pred["truth"]                    # predictions = reference + error
     pe = pred.drop(columns=["truth"])
     for m in models:
         pe[m] = pred[m] - pred["truth"]                     # prediction errors: prediction minus reference
@@ -361,7 +340,7 @@ def test_adjusted_cis_for_every_metric():
     check("they are Bonferroni intervals: equal to the unadjusted CIs at level 1 - 0.05/3", ok_bonf)
     ratio = (w["AUC Diff 95% CI adj high"] - w["AUC Diff 95% CI adj low"]) / (w["AUC Diff 95% CI high"] - w["AUC Diff 95% CI low"])
     check("AUC: difference ± z(1 - α/2m) × SE", np.allclose(ratio, osx.stats.norm.ppf(1 - 0.05 / 6) / osx.stats.norm.ppf(0.975)))
-    df = iol_like_data(seed=5).drop(columns=["eye"])              # 4 models, 6 pairs
+    df = continuous_data(seed=5).drop(columns=["eye"])              # 4 models, 6 pairs
     q6 = 1 - 0.05 / 6
     ok = True
     for weighting in ("eye", "patient"):
@@ -385,7 +364,7 @@ def test_adjusted_cis_for_every_metric():
 
 def test_adjustment_method_columns():
     s = {"bootstrap_iterations": 499, "verbose": False}
-    df = iol_like_data(seed=5).drop(columns=["eye"])
+    df = continuous_data(seed=5).drop(columns=["eye"])
     _, lc, info = osx.compare_models(df, task="continuous", settings=s)
     pm = lc.drop_duplicates("metric").set_index("metric")
     rw, bt = "Romano-Wolf step-down", "Romano-Wolf simultaneous (max-|t|)"

@@ -1,4 +1,4 @@
-"""Make the two synthetic example datasets (one row per eye). Run once; the CSVs are included in the repository."""
+"""Make the synthetic example data (one row per eye): example_classifier.csv and example_continuous.csv."""
 import numpy as np
 import pandas as pd
 
@@ -29,7 +29,7 @@ for name, sd in (("model_A", 0.7), ("model_B", 0.9), ("model_C", 1.2)):
 pd.DataFrame({"patient_id": [f"P{p:03d}" for p in pid], "eye": eye, "truth": truth, **models}).to_csv(
     "example_classifier.csv", index=False)
 
-# continuous output: a measurement predicted by three models (e.g. a refractive or biometric value)
+# continuous output: prediction errors of three models for a measured value (e.g. refraction)
 pid, eye = patients(250, 0.6)
 n = len(pid)
 measured = np.round(rng.normal(0, 2, n), 2)
@@ -37,18 +37,11 @@ shared = 0.3 * rng.normal(size=pid.max() + 1)[pid] + 0.3 * rng.normal(size=n)
 cont = {}
 for name, sd in (("model_A", 0.25), ("model_B", 0.30), ("model_C", 0.40)):
     cont[name] = np.round(measured + shared + rng.normal(0, sd, n), 2)
-pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "truth": measured, **cont}).to_csv(
-    "example_continuous.csv", index=False)
-
-# the same continuous example given as prediction errors (prediction minus measured value), the primary input for
-# continuous outputs, with an axial length per eye (fellow eyes alike) for a continuous subgroup; drawn after the
-# data above, so those files are unchanged
+# axial length and mean keratometry per eye (fellow eyes alike), for subgroups
 axial_length = np.round(rng.normal(23.6, 1.3, size=pid.max() + 1)[pid] + rng.normal(0, 0.12, n), 2)
-# mean keratometry (D), lower in longer eyes, for a second subgroup and for crossing with axial length; drawn last,
-# so the columns above are unchanged
 mean_k = np.round(43.6 - 0.9 * (axial_length - 23.6) + rng.normal(0, 1.0, size=pid.max() + 1)[pid]
                   + rng.normal(0, 0.15, n), 2)
 errors = {name: np.round(pred - measured, 2) for name, pred in cont.items()}
 pd.DataFrame({"patient_id": [f"Q{p:03d}" for p in pid], "eye": eye, "axial_length": axial_length, "mean_k": mean_k,
-              **errors}).to_csv("example_continuous_errors.csv", index=False)
-print("written example_classifier.csv, example_continuous.csv and example_continuous_errors.csv")
+              **errors}).to_csv("example_continuous.csv", index=False)
+print("written example_classifier.csv and example_continuous.csv")
