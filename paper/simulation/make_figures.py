@@ -8,7 +8,6 @@ Figures and table data for the manuscript (run after analyse_simulation.py and a
              one-eye conclusion depends on the eye kept.
   Figure S2  Design effect: false-positive rate of an eye-level analysis and extra patients needed with one eye.
   Figure S3  Simulation against the design-effect predictions.
-  Figure S4  False-positive rate against rho_delta with 40% and 80% of patients bilateral (all settings).
   (Figure 5 comes from realdata/papila_figure.py; Supplementary Figure S1 from manuscript/build_supplement.py.)
 
 Writes figures/*.tiff (600 dpi, LZW, RGB) with .png previews, and results/table1_simulation.csv,
@@ -313,22 +312,6 @@ def figure_type1(s):
     _type1_legend(fig, axes[0], -0.07)
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     save(fig, "Figure3")
-    # Figure S4: both proportions bilateral
-    fig, axes = plt.subplots(2, 2, figsize=(7.0, 5.4), sharex=True, sharey=True)
-    for i, task in enumerate(("continuous", "binary")):
-        for j, f in enumerate((0.4, 0.8)):
-            ax = axes[i, j]
-            _type1_panel(ax, h[(h.task == task) & (h.frac == f)], f)
-            title = "Continuous outputs" if task == "continuous" else "Classifiers"
-            ax.set_title(f"{title}, {int(f * 100)}% of patients with both eyes", loc="left")
-            if j == 0:
-                ax.set_ylabel("False-Positive Rate (%)")
-            if i == 1:
-                ax.set_xlabel(RHO_LABEL)
-            panel_label(ax, "ABCD"[2 * i + j])
-    _type1_legend(fig, axes[0, 0], -0.04)
-    fig.tight_layout(rect=(0, 0.07, 1, 1))
-    save(fig, "FigureS4")
 
 
 # ---------------------------------------------------------------------------------------------- Figure 4
