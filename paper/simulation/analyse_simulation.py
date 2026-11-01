@@ -9,7 +9,10 @@ For every grid cell, analysis strategy and metric it reports:
   rel_var    var_diff relative to the eye-weighted cluster analysis of the same studies
              (for one eye per patient this is the factor by which a one-eye study would need more patients)
   coverage   proportion of cluster 95% CIs containing the true difference (0 under the null; under the
-             alternative the Monte Carlo mean of the estimates)
+             alternative the Monte Carlo mean of the estimates). For the mean error, MAE, Brier score and
+             log-loss, whose CIs became symmetric in ophthalmology-stats 1.4.0, it is taken from
+             results/coverage_symmetric.csv when that file exists (coverage_symmetric.py; null cells only, so it
+             is left empty for these metrics in the other cells)
   rho_delta  mean fellow-eye intraclass correlation of the per-eye loss difference (cluster analysis)
 and the values predicted from the design effect for unequal cluster sizes (Kerry & Bland 2001;
 Eldridge et al. 2006), using the measured rho_delta and the observed proportion of bilateral patients f:
@@ -35,6 +38,7 @@ OUT = os.path.join(HERE, "output_suite")     # simulation run with ophthalmology
 RES = os.path.join(HERE, "results")
 N_PATIENTS_MAIN = 250
 ALPHA = 0.05
+SYMMETRIC = {"bias", "mae", "brier", "logloss"}   # CIs made symmetric in ophthalmology-stats 1.4.0
 
 
 def phi(x):
@@ -66,7 +70,12 @@ def predicted(f, rho):
             "pred_naive_type1": 2 * (1 - phi(1.959964 / sqrt(1 + 2 * f * rho / (1 + f))))}
 
 
-def summarise_cell(path):
+def symmetric_coverage():
+    path = os.path.join(RES, "coverage_symmetric.csv")
+    return pd.read_csv(path).set_index(["cell", "metric"]).coverage if os.path.exists(path) else None
+
+
+def summarise_cell(path, sym=None):
     d = pd.read_csv(path)
     cid = d["cell"].iloc[0]
     meta = parse_cell(cid)
@@ -103,6 +112,9 @@ def summarise_cell(path):
         base = out.loc[sel & (out.strategy == "cluster"), "var_diff"]
         if len(base):
             out.loc[sel, "rel_var"] = out.loc[sel, "var_diff"] / float(base.iloc[0])
+    if sym is not None:
+        for metric in SYMMETRIC & set(out.metric):
+            out.loc[(out.metric == metric) & (out.strategy == "cluster"), "coverage"] = sym.get((cid, metric), np.nan)
     return out
 
 
@@ -124,12 +136,15 @@ def summarise_lottery(path):
 
 def main():
     os.makedirs(RES, exist_ok=True)
+    sym = symmetric_coverage()
+    if sym is not None:
+        print(f"coverage for {sorted(SYMMETRIC)} from coverage_symmetric.csv ({len(sym)} cell-metrics)")
     for part in ("main", "sweep"):
         files = sorted(f for f in glob.glob(os.path.join(OUT, part, "*.csv.gz")) if not f.endswith(".orig.csv.gz"))
         if not files:
             print(f"no files in output/{part}")
             continue
-        s = pd.concat([summarise_cell(f) for f in files], ignore_index=True)
+        s = pd.concat([summarise_cell(f, sym) for f in files], ignore_index=True)
         s.to_csv(os.path.join(RES, f"summary_{part}.csv"), index=False)
         print(f"summary_{part}.csv: {len(files)} cells, {len(s)} rows")
     files = sorted(glob.glob(os.path.join(OUT, "lottery", "*.csv.gz")))
