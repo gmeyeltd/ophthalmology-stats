@@ -54,10 +54,34 @@ def test_matches_version_1_2():
     wide, _, _ = osx.compare_models(continuous_data().drop(columns=["eye"]), task="continuous",
                                     settings={"bootstrap_iterations": 999, "invalid_threshold": 4.0, "verbose": False})
     ref = pd.read_csv(EXPECTED)
-    num = [c for c in ref.columns if c not in ("Model A", "Model B")]
+    # version 1.4 made the MPE and MAE CIs symmetric (they were equal-tailed); everything else is unchanged
+    changed = [f"{m} Diff 95% CI {e}" for m in ("MPE", "MAE") for e in ("low", "high")]
+    num = [c for c in ref.columns if c not in ("Model A", "Model B") and c not in changed]
     worst = float(np.nanmax(np.abs(ref[num].values - wide[num].values.astype(float))))
-    check(f"continuous results identical to version 1.2 and biometry-stats ({len(num)} columns, max |diff| {worst:.1e})",
-          list(ref.columns) == [c for c in wide.columns if c != "Group"] and worst < 1e-12)
+    check(f"continuous results identical to version 1.2 and biometry-stats ({len(num)} columns, max |diff| {worst:.1e}; "
+          "MPE and MAE CIs now symmetric)", list(ref.columns) == [c for c in wide.columns if c != "Group"] and worst < 1e-12)
+
+
+def test_symmetric_ci_agrees_with_p():
+    """The bootstrap-t CI is symmetric about the difference and excludes 0 exactly when P is small (away from the
+    0.05 boundary, where the (1 + b)/(B + 1) rule and quantile interpolation can differ by one resample)."""
+    ok, n = True, 0
+    for seed in range(6):
+        df = continuous_data(seed=seed)
+        E = df[[c for c in df.columns if c.startswith("F")]].values
+        _, idx = np.unique(df.patient_id.astype(str).values, return_inverse=True)
+        K = idx.max() + 1
+        b = np.random.default_rng(seed).choice(K, size=(999, K))
+        f = osx.all_pairs_bootstrap(E, idx, K, b, ci_level=0.95)
+        g, _ = osx.all_pairs_loss_bootstrap({"MAE": np.abs(E), "MPE": E}, idx, K, b, ci_level=0.95)
+        for r in list(f.values()) + list(g.values()):
+            for key in ("MAE", "MPE"):
+                lo, hi = r[f"CI_{key}"]
+                p = r[f"P_{key}"]
+                excl = lo > 0 or hi < 0
+                ok &= (excl if p < 0.04 else (not excl) if p > 0.06 else True)
+                n += 1
+    check(f"symmetric bootstrap-t CIs agree with their P values ({n} intervals)", ok)
 
 
 def test_loss_engine_matches_continuous_engine():

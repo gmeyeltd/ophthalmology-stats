@@ -64,16 +64,19 @@ The workbook has five sheets: Results (one row per model pair), Statistical Test
 | | Sensitivity, specificity, accuracy | Clustered McNemar test |
 
 Each model's performance is given with a patient-level 95% confidence interval (CI), and each difference between
-two models with a 95% CI, a p-value and an adjusted p-value. The Estimates sheet also gives `rho_delta`, the
+two models with a 95% CI, a p-value and an adjusted p-value. For the bootstrap-t metrics the CI is the symmetric
+bootstrap-t interval from the same resamples as the p-value, so it excludes 0 when p < 0.05. The Estimates sheet also gives `rho_delta`, the
 fellow-eye correlation of the per-eye difference between the two models, and `one_eye_factor`, how many times
 more patients a study keeping one eye per patient would need for the same precision.
 
 ## Multiple comparisons
 
 P-values are adjusted for the model pairs of each metric: Romano-Wolf step-down for the bootstrap tests and
-Hommel for the others. An adjusted CI is given only where it matches the adjusted p-value: Romano-Wolf
-simultaneous intervals for the mean error, MAE, median absolute error, Brier score and log-loss. With
-`fwer_method="bonferroni"`, every metric gets Bonferroni p-values and matching intervals. The columns
+Hommel for the others. An adjusted CI is given only where it comes from the same adjustment as the p-value:
+Romano-Wolf simultaneous intervals for the mean error, MAE, median absolute error, Brier score and log-loss. These
+are single-step intervals, so one that excludes 0 always has an adjusted p-value below 0.05, although a step-down
+rejection can occasionally have an interval that includes 0. Hommel p-values have no corresponding interval. With
+`fwer_method="bonferroni"`, every metric gets Bonferroni p-values and Bonferroni intervals. The columns
 `p_adj_method` and `ci_adj_method` name the adjustment of each row.
 
 ## Subgroups
@@ -102,8 +105,9 @@ Passed as `settings={...}` to `analyze`.
 
 ## Validation
 
-`python tests/test_ophthalmology_stats.py` runs 66 checks. These include that the continuous-output results are
-identical to version 1.2 and biometry-stats, that the clustered AUC test equals DeLong's when every patient has
+`python tests/test_ophthalmology_stats.py` runs 67 checks. These include that the continuous-output p-values are
+identical to version 1.2 and biometry-stats (version 1.4 made the bootstrap-t CIs symmetric), that each CI agrees
+with its p-value, that the clustered AUC test equals DeLong's when every patient has
 one eye, and that the Bonferroni intervals equal the unadjusted intervals at level 1 - 0.05/m.
 
 `paper/` holds the code behind the accompanying paper, with its random seeds: the simulation, the literature
