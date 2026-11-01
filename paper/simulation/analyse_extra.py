@@ -6,7 +6,8 @@ Writes to ./results/
                                the code's patient-level test and the measured rho_delta of the same studies
   summary_extra_gee_sweep.csv  GEE type I error and power across study size, beside the code's
   summary_extra_small.csv      20 and 30 patients: type I error of the code's tests, GEE and GEE with the
-                               Mancl-DeRouen correction
+                               Mancl-DeRouen correction (Wald test, normal reference), and both GEE tests referred
+                               instead to t with (patients - 1) degrees of freedom (strategies gee_t, gee_br_t)
   summary_extra_sens.csv       within-eye correlation 0.5 and 0.95: type I error, relative variance of one eye per
                                patient and the design-effect predictions, as summary_main.csv
 and prints a short overview. Usage (from this folder):  python analyse_extra.py   (--pilot reads the pilot run)
@@ -15,7 +16,9 @@ import glob
 import os
 import sys
 
+import numpy as np
 import pandas as pd
+from scipy import stats
 
 from analyse_simulation import RES, summarise_cell
 
@@ -33,6 +36,24 @@ def summarise(part):
     if m.notna().any():
         s.insert(s.columns.get_loc("psi") + 1, "within_eye_corr", m.astype(float))
     return s
+
+
+def t_reference(s, part="small"):
+    """GEE P values from a t distribution with (patients - 1) degrees of freedom instead of the normal: each stored
+    two-sided normal P value gives back |z| exactly, which is then referred to t. Adds rows gee_t and gee_br_t."""
+    rows = []
+    for f in sorted(glob.glob(os.path.join(OUT, part, "*.csv.gz"))):
+        d = pd.read_csv(f)
+        cell = os.path.basename(f).replace(".csv.gz", "")
+        base = s[s.cell == cell]
+        for st in ("gee", "gee_br"):
+            for _, r in base[base.strategy == st].iterrows():
+                p = d[f"{st}|{r.metric}|p"].astype(float)
+                p = p[p.notna()]
+                z = stats.norm.isf(np.clip(p.values, 1e-300, 1.0) / 2)
+                pt = 2 * stats.t.sf(z, int(r.n_patients) - 1)
+                rows.append({**r.to_dict(), "strategy": st + "_t", "reject": float((pt < 0.05).mean())})
+    return pd.concat([s, pd.DataFrame(rows)], ignore_index=True) if rows else s
 
 
 def beside_main(gee, part):
@@ -71,6 +92,7 @@ def main():
 
     s = summarise("small")
     if s is not None:
+        s = t_reference(s)
         s.to_csv(os.path.join(RES, "summary_extra_small.csv"), index=False)
         print("\n20 and 30 patients, null: type I error (cluster = the code; gee_br = Mancl-DeRouen)")
         print(s.pivot_table(index=["task", "metric"], columns=["n_patients", "frac", "strategy"],
