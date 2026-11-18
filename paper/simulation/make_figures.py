@@ -4,7 +4,7 @@ Figures and table data for the manuscript (run after analyse_simulation.py and a
   Figure 1   Study designs: where the second eye enters a study that applies AI to eyes.
   Figure 2   Survey of published studies (random sample): what studies did with the second eye.
   Figure 3   False-positive rate (type I error) against rho_delta, 80% of patients bilateral.
-  Figure 4   The cost of keeping one eye per patient: power against study size for 6 metrics, and how often a
+  Figure 4   The cost of keeping one eye per individual: power against study size for 6 metrics, and how often a
              one-eye conclusion depends on the eye kept.
   Figure S2  Design effect: false-positive rate of an eye-level analysis and extra patients needed with one eye.
   Figure S3  Simulation against the design-effect predictions.
@@ -36,8 +36,8 @@ LOTTERY = os.path.join(HERE, "output_suite", "lottery")
 # for one eye per patient, greys for everything else; white background throughout
 COL = {"cluster": "#000000", "naive": "#B2182B", "one_eye": "#2166AC"}
 MARK = {"cluster": "o", "naive": "s", "one_eye": "^"}
-LAB = {"cluster": "Both eyes, patient as the unit", "naive": "Both eyes treated as independent",
-       "one_eye": "One eye per patient"}
+LAB = {"cluster": "Both eyes, correlation-adjusted", "naive": "Both eyes treated as independent",
+       "one_eye": "One eye per individual"}
 TABLE_LAB = dict(LAB, patient="Both eyes, each patient weighted equally",
                  optimal="Both eyes, weights chosen for the smallest variance")
 INK, INK2, GRID, BAND = "#000000", "#404040", "#e3e3e3", "#ececec"
@@ -136,7 +136,7 @@ def figure_designs():
     xl, wl = 0.115, 0.22
     xr, wr = 0.6125, 0.745
     xs, w = (0.36, 0.6125, 0.865), 0.24
-    box(0.5, 0.99, 0.62, 0.075, body="AI applied to images or measurements of eyes,\nin data where some patients "
+    box(0.5, 0.99, 0.62, 0.075, body="AI applied to images or measurements of eyes,\nin data where some individuals "
         "contribute both eyes")
     arrow(0.28, 0.915, xl, 0.84); arrow(0.6125, 0.915, xr, 0.84)
     box(xl, 0.84, wl, h(4), head="AI as a measuring tool",
@@ -147,13 +147,13 @@ def figure_designs():
     y3 = 0.655
     for x in xs:
         arrow(x, y2, x, y3)
-    heads = ("One output per patient", "One eye per patient", "A result for each eye")
-    bodies = ("The model reads both eyes\nand gives a single result\nfor the patient",
+    heads = ("One output per individual", "One eye per individual", "A result for each eye")
+    bodies = ("The model reads both eyes\nand gives a single result\nfor the individual",
               "One eye is chosen by\ndesign, or the second eye\nis discarded",
-              "Both eyes of some patients\nare in the test set, each\nwith its own result")
-    results = ("One result per patient.\nStandard tests apply.",
+              "Both eyes of some\nindividuals are in the test\nset, each with its own result")
+    results = ("One result per individual.\nStandard tests apply.",
                "Standard tests apply, but\nless data are used, and\nthe result can depend on\nwhich eye was kept.",
-               "Fellow eyes are correlated,\nso analyze with the patient\nas the unit. Treating eyes\nas independent "
+               "Fellow eyes are correlated,\nso account for the\ncorrelation. Treating eyes\nas independent "
                "overstates\nprecision.")
     y4 = 0.43
     for i, (x, hd, bd, rs) in enumerate(zip(xs, heads, bodies, results)):
@@ -162,7 +162,7 @@ def figure_designs():
         box(x, y4, w, h(5, head=False), body=rs, lw=1.8 if i == 2 else 0.7)
     arrow(xl, 0.84 - h(4), xl, y4)
     box(xl, y4, wl, h(5), head="Association analysis",
-        body="Both eyes enter a\nregression with the\npatient as the unit, for\nexample generalized\nestimating equations")
+        body="Both eyes enter a\nregression that accounts\nfor the correlation, for\nexample generalized\nestimating equations")
     ax.text(xs[2], y4 - h(5, head=False) - 0.012, "Focus of this study", ha="center", va="top", fontsize=7,
             fontstyle="italic")
     save(fig, "Figure1")
@@ -186,9 +186,9 @@ def _largest_remainder(x, total):
 
 ICONS = [("none", "Both eyes, no confidence interval for accuracy", "#6e6e6e"),
          ("indep", "Both eyes, interval or test assuming independent eyes", COL["naive"]),
-         ("clustered", "Both eyes, interval or test with the patient as the unit", INK),
-         ("unit_one", "One eye, or one output, per patient", "#c4c4c4"),
-         ("unit_unclear", "Number of eyes per patient unclear", "#ededed")]
+         ("clustered", "Both eyes, correlation-adjusted interval or test", INK),
+         ("unit_one", "One eye, or one output, per individual", "#c4c4c4"),
+         ("unit_unclear", "Number of eyes per individual unclear", "#ededed")]
 
 
 def survey_icons(S):
@@ -221,17 +221,17 @@ def figure_survey():
 
     ax = fig.add_subplot(gsB[0, 0])
     e, b = S["eligible"], S["both"]
-    rows = [(f"§Eyes per patient ({e} eligible studies)", None),
-            ("Both eyes of some patients", "unit_both"),
-            ("One eye, or one output, per patient", "unit_one"),
+    rows = [(f"§Eyes per individual ({e} eligible studies)", None),
+            ("Both eyes of some individuals", "unit_both"),
+            ("One eye, or one output, per individual", "unit_one"),
             ("Unclear", "unit_unclear"),
             (f"§Analysis of accuracy ({b} studies using both eyes)", None),
             ("No confidence interval reported", "none"),
             ("Interval or test assuming independent eyes", "indep"),
-            ("Interval or test with the patient as the unit", "clustered"),
+            ("Correlation-adjusted interval or test", "clustered"),
             (f"§Data splitting ({b} studies using both eyes)", None),
-            ("By patient, preventing leakage (good practice)", "split_patient"),
-            ("By eye or image (images of one patient can leak)", "split_image"),
+            ("By individual, preventing leakage (good practice)", "split_patient"),
+            ("By eye or image (images of one individual can leak)", "split_image"),
             ("Separate external test set only", "split_external"),
             ("Not reported", "split_nr"),
             (f"§Other reporting ({b} studies; not mutually exclusive)", None),
@@ -283,7 +283,7 @@ def _type1_panel(ax, d, f, annotate=False):
     if annotate:
         ax.text(0.03, 0.97, "Eyes treated as independent: false positives\nrise as fellow eyes become more alike",
                 transform=ax.transAxes, ha="left", va="top", fontsize=7, color=COL["naive"])
-        ax.text(0.03, 0.82, "Patient as the unit: close to the intended\n5% whatever the correlation",
+        ax.text(0.03, 0.82, "Correlation-adjusted: close to the intended\n5% whatever the correlation",
                 transform=ax.transAxes, ha="left", va="top", fontsize=7, color=INK)
 
 
@@ -347,7 +347,7 @@ def figure_one_eye_cost():
             need[st] = int(round(n80(x)))
         ax.axhline(80, color=INK2, lw=0.5, ls=(0, (3, 2)))
         extra = need["one_eye"] / need["cluster"] - 1
-        ax.text(0.97, 0.05, f"Patients for 80% power\nboth eyes {need['cluster']}, one eye {need['one_eye']}"
+        ax.text(0.97, 0.05, f"Individuals for 80% power\nboth eyes {need['cluster']}, one eye {need['one_eye']}"
                 f"\n(one eye needs {extra:.0%} more)", transform=ax.transAxes, ha="right", va="bottom", fontsize=6.4,
                 linespacing=1.25)
         grid(ax)
@@ -356,7 +356,7 @@ def figure_one_eye_cost():
         if i % 3 == 0:
             ax.set_ylabel("Power (%)")
         if i >= 3:
-            ax.set_xlabel("Patients per Study")
+            ax.set_xlabel("Individuals per Study")
         ax.set_title(title, loc="left", fontsize=8)
         panel_label(ax, "ABCDEF"[i], x=-0.2)
     hp, lp = fig.axes[0].get_legend_handles_labels()
@@ -370,29 +370,32 @@ def figure_one_eye_cost():
                                        ("binary", "Classifiers (area under the ROC curve)"))):
         ax = fig.add_subplot(gs2[0, j]); axes2.append(ax)
         d = pd.read_csv(os.path.join(LOTTERY, f"lottery_{task}.csv.gz"))
-        bins = np.linspace(0, 1, 11)
-        cnt, _ = np.histogram(d.one_eye_frac_sig, bins=bins)
-        share = 100 * cnt / len(d)
-        colors = [COL["one_eye"] if 0 < b < 9 else SAME for b in range(10)]
-        ax.bar(100 * (bins[:-1] + 0.05), share, width=9, color=colors, zorder=2)
-        grid(ax)
-        ax.set_xlim(0, 100); ax.set_ylim(0, 48)
-        ax.set_xlabel("Random Choices of Eye Giving P < 0.05 (%)")
-        if j == 0:
-            ax.set_ylabel("Simulated Studies (%)")
-        mid = ((d.one_eye_frac_sig >= 0.1) & (d.one_eye_frac_sig <= 0.9)).mean()
-        ax.text(60, 31, f"Conclusion depends on the eye kept\n(10%-90% of choices significant): "
-                f"{mid:.0%}", ha="center", va="bottom", fontsize=6.6, color=COL["one_eye"])
-        ax.text(1, share[0] + 1, "Rarely or never\nsignificant\n(difference\nmissed)", ha="left", va="bottom",
-                fontsize=6.0, color=INK2)
-        ax.text(99.5, share[9] + 1, "Almost always\nsignificant", ha="right", va="bottom", fontsize=6.0, color=INK2)
-        ax.text(0.01, 0.985, f"Both eyes, patient as the unit:\nsignificant in {d.cluster_sig.mean():.0%} of "
-                "the same studies", transform=ax.transAxes, ha="left", va="top", fontsize=6.4, color=INK)
+        f = d.one_eye_frac_sig.values
+        dis = 100 * 2 * f * (1 - f)                     # two investigators, each keeping a random eye, disagree
+        rng = np.random.default_rng(7)
+        ax.scatter(dis, rng.uniform(0.15, 0.85, len(dis)), s=9, facecolor="white", edgecolor=COL["one_eye"],
+                   lw=0.6, zorder=3)
+        bs = rng.integers(0, len(dis), (4000, len(dis)))
+        lo, hi = np.percentile(dis[bs].mean(1), [2.5, 97.5])
+        ax.plot([dis.mean()] * 2, [0.05, 0.95], color=INK, lw=2.2, zorder=4)
+        ax.set_xlim(-1.5, 51.5); ax.set_ylim(0, 1.32)
+        ax.set_yticks([])
+        ax.set_xticks([0, 10, 20, 30, 40, 50])
+        ax.set_xticklabels(["0", "10", "20", "30", "40", "50"])
+        for x in (10, 20, 30, 40):
+            ax.axvline(x, color=GRID, lw=0.5, zorder=0)
+        for sp in ("left", "top", "right"):
+            ax.spines[sp].set_visible(False)
+        ax.set_xlabel("Chance Two Investigators Disagree (%)")
+        ax.text(0.0, 1.0, f"Average {dis.mean():.0f}% ({lo:.0f}%-{hi:.0f}%); each dot is one study",
+                transform=ax.transAxes, ha="left", va="top", fontsize=6.6, color=INK)
+        ax.text(0.0, 0.89, f"Both eyes, correlation-adjusted: significant in {d.cluster_sig.mean():.0%}",
+                transform=ax.transAxes, ha="left", va="top", fontsize=6.2, color=INK2)
         ax.set_title(title, loc="left", fontsize=8)
         panel_label(ax, "GH"[j], x=-0.13)
     fig.canvas.draw()
     fig.text(0.06, axes2[0].get_position().y1 + 0.038,
-             "With one random eye per patient, does the conclusion depend on which eye was kept?", fontsize=8.5,
+             "With one random eye per individual, would two investigators keeping different eyes agree?", fontsize=8.5,
              fontweight="bold", ha="left")
     fig.legend(hp, lp, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.0), markerscale=1.3)
     save(fig, "Figure4")

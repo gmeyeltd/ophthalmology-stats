@@ -1,7 +1,8 @@
 """Figure 5: the PAPILA worked example.
 
-Panel A: P values for each pair of models analysed with the patient as the unit and with fellow eyes treated as
-independent. Panel B: P values with one randomly chosen eye per patient, over 200 random choices of eye.
+Panel A: P values for each pair of models analysed with a correlation-adjusted analysis and with fellow eyes treated as
+independent. Panel B: P values with one randomly chosen eye per individual, over 200 random choices of eye, with the share of
+choices giving P < 0.05 (f) and the chance that two investigators keeping random eyes disagree, 2f(1 - f).
 
 Run after papila_example.py:  python papila_figure.py [--results results]
 Writes figures/Figure5.tiff (600 dpi, LZW, RGB) and figures/Figure5.png.
@@ -26,7 +27,7 @@ plt.rcParams.update({
     "ytick.color": INK, "axes.labelcolor": INK, "text.color": INK, "axes.spines.top": False,
     "axes.spines.right": False, "savefig.facecolor": "white"})
 FLOOR = 1e-3                          # smallest P shown (bootstrap P values with 999 resamples start at 0.001)
-NAMES = {"Cup-to-disc ratio": "CDR"}
+NAMES = {"Cup-to-disc ratio": "Cup-to-disc ratio"}
 METRICS = (("auc", "Area under the ROC curve"), ("brier", "Brier score"))
 
 
@@ -99,6 +100,7 @@ def main():
         axB.scatter(x, y + rng.uniform(-0.2, 0.2, len(x)), s=6, color=COL["one_eye"], alpha=0.5, lw=0, zorder=2)
         axB.scatter(pc, y, marker="o", s=30, color=COL["cluster"], edgecolor="white", lw=0.6, zorder=5)
         axB.text(2.0, y, f"{100 * r['frac']:.0f}%", va="center", ha="left", fontsize=7.5)
+        axB.text(40.0, y, f"{200 * r['frac'] * (1 - r['frac']):.0f}%", va="center", ha="left", fontsize=7.5)
     for ax in (axA, axB):
         _axis(ax)
     axA.set_yticks([y for y, r in zip(ys, R) if "header" not in r])
@@ -111,9 +113,10 @@ def main():
     yb = next(y for y, r in zip(ys, R) if r.get("header") == "Brier score")
     axA.text(0.0011, yb, "The gap widens as fellow eyes\nbecome more alike (higher $\\rho_\\Delta$)",
              ha="left", va="center", fontsize=7, color=COL["naive"])
-    axB.text(2.0, n - 0.75, "Eye choices\nwith P < 0.05", va="center", ha="left", fontsize=7, fontweight="bold")
-    axA.set_title("Treating fellow eyes as independent\nmakes P values too small", loc="left", fontweight="bold")
-    axB.set_title("With one eye per patient, the P value\ndepends on which eye was kept", loc="left",
+    axB.text(2.0, n - 0.75, "Choices\nwith\nP < 0.05", va="center", ha="left", fontsize=7, fontweight="bold")
+    axB.text(40.0, n - 0.75, "Two\ninvestigators\ndisagree", va="center", ha="left", fontsize=7, fontweight="bold")
+    axA.set_title("Treating fellow eyes as\nindependent makes P\nvalues too small", loc="left", fontweight="bold")
+    axB.set_title("With one eye per individual,\nthe P value depends on\nwhich eye was kept", loc="left",
                   fontweight="bold")
     for ax, lab in ((axA, "A"), (axB, "B")):
         ax.text(-0.02 if ax is axB else -0.62, 1.03, lab, transform=ax.transAxes, fontsize=10, fontweight="bold",
@@ -122,9 +125,9 @@ def main():
     hand = [Line2D([], [], marker="o", ls="", ms=5, color=COL["cluster"]),
             Line2D([], [], marker="s", ls="", ms=5, color=COL["naive"]),
             Line2D([], [], marker="o", ls="", ms=3, color=COL["one_eye"], alpha=0.6)]
-    fig.legend(hand, ["Both eyes, patient as the unit (valid analysis)",
+    fig.legend(hand, ["Both eyes, correlation-adjusted (valid analysis)",
                       "Both eyes treated as independent (P falsely small)",
-                      "One random eye per patient (each of 200 choices)"],
+                      "One random eye per individual (each of 200 choices)"],
                loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.45, -0.17), handletextpad=0.3,
                columnspacing=1.5)
     fit_width(fig)
